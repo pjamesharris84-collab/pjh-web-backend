@@ -19,28 +19,17 @@ dotenv.config();
 
 const app = express();
 
-// -----------------------------
-// 🌐 CORS CONFIG — VERCEL + LOCAL
-// -----------------------------
-const allowedOrigins = [
-  "http://localhost:5173", // local dev
-  "https://pjh-web-frontend-bx4j.vercel.app/", // your Vercel frontend
-];
-
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        console.warn("🚫 Blocked CORS request from:", origin);
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
+    origin: [
+      "http://localhost:5173", // local dev
+      "https://pjh-web-frontend.vercel.app" // your deployed frontend
+    ],
+    methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   })
 );
+
 
 app.use(express.json());
 
