@@ -18,17 +18,45 @@ import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+// -----------------------------
+// 🌐 CORS CONFIG — VERCEL + LOCAL
+// -----------------------------
+const allowedOrigins = [
+  "http://localhost:5173", // local dev
+  "https://pjh-web-frontend-bx4j.vercel.app/", // your Vercel frontend
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.warn("🚫 Blocked CORS request from:", origin);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  })
+);
+
 app.use(express.json());
 
+// -----------------------------
 // 🧩 Environment summary
+// -----------------------------
 console.log("🧩 Environment loaded:", {
   PORT: process.env.PORT,
   PG_DB: process.env.PG_DB,
   ADMIN_PASS: process.env.ADMIN_PASS ? "(set)" : "(missing)",
+  NODE_ENV: process.env.NODE_ENV,
 });
 
-// Run migrations before accepting requests
+// -----------------------------
+// 🛠️ Run migrations before accepting requests
+// -----------------------------
 await runMigrations();
 
 // -----------------------------
@@ -78,7 +106,7 @@ app.use("/api/orders", orderDiaryRoutes); // backward compatibility
 // 🌐 Root Endpoint
 // -----------------------------
 app.get("/", (req, res) => {
-  res.send("✅ PJH Web Services API running successfully");
+  res.send("✅ PJH Web Services API running successfully on Render");
 });
 
 // -----------------------------
@@ -86,5 +114,5 @@ app.get("/", (req, res) => {
 // -----------------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>
-  console.log(`🚀 Server running on http://localhost:${PORT}`)
+  console.log(`🚀 Server live at: http://localhost:${PORT}`)
 );
