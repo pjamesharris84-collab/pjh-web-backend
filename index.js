@@ -5,7 +5,6 @@ import { runMigrations } from "./db.js";
 import { sendEmail } from "./utils/email.js";
 
 // ✅ Modular route imports
-import contactRoutes from "./routes/contact.js";
 import adminQuotesRoutes from "./routes/adminQuotes.js";
 import authRoutes from "./routes/auth.js";
 import customerRoutes from "./routes/customers.js";
@@ -76,7 +75,6 @@ app.post("/api/contact", async (req, res) => {
 // -----------------------------
 // 📦 API Routes
 // -----------------------------
-app.use("/api/contact", contactRoutes);
 app.use("/api/admin/quotes", adminQuotesRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
