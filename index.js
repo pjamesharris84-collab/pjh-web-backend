@@ -4,7 +4,6 @@ import dotenv from "dotenv";
 import { runMigrations } from "./db.js";
 import { sendEmail } from "./utils/email.js";
 
-// ✅ Modular route imports
 import adminQuotesRoutes from "./routes/adminQuotes.js";
 import authRoutes from "./routes/auth.js";
 import customerRoutes from "./routes/customers.js";
@@ -18,36 +17,34 @@ dotenv.config();
 const app = express();
 
 // -----------------------------------------
-// 🌍 CORS Configuration
+// 🌍 Dynamic CORS Configuration
 // -----------------------------------------
-const allowedOrigins = [
-  "http://localhost:5173", // local dev
-  "https://pjh-web-frontend.vercel.app", // default Vercel deployment
-  "https://pjh-web-frontend-git-main-pj-harris-projects.vercel.app", // preview branch
-  "https://www.pjhwebservices.co.uk", // custom domain
-];
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+if (!allowedOrigins.includes("http://localhost:5173")) {
+  allowedOrigins.push("http://localhost:5173"); // always allow local dev
+}
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow no-origin requests (like Postman, server-side)
-      if (!origin) return callback(null, true);
-
-      if (allowedOrigins.includes(origin)) {
+      if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
-      } else {
-        console.warn(`❌ Blocked CORS request from: ${origin}`);
-        return callback(new Error("Not allowed by CORS"), false);
       }
+      console.warn(`🚫 Blocked CORS request from: ${origin}`);
+      return callback(new Error("Not allowed by CORS"), false);
     },
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
 
-// ✅ Add standard security headers
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Credentials", "true");
+// ✅ Handle preflight requests explicitly
+app.options("*", (req, res) => {
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.header(
     "Access-Control-Allow-Headers",
     "Origin, X-Requested-With, Content-Type, Accept, Authorization"
@@ -56,40 +53,36 @@ app.use((req, res, next) => {
     "Access-Control-Allow-Methods",
     "GET, POST, PUT, DELETE, OPTIONS"
   );
-  next();
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.sendStatus(200);
 });
 
 // -----------------------------------------
-// 🔧 Core Middleware
+// 🧩 Environment Info
+// -----------------------------------------
+console.log("🧩 Loaded environment:", {
+  NODE_ENV: process.env.NODE_ENV,
+  PORT: process.env.PORT,
+  ALLOWED_ORIGINS: allowedOrigins,
+});
+
+// -----------------------------------------
+// 🧰 Middleware
 // -----------------------------------------
 app.use(express.json());
 
 // -----------------------------------------
-// 🧩 Environment Summary
-// -----------------------------------------
-console.log("🧩 Environment loaded:", {
-  NODE_ENV: process.env.NODE_ENV,
-  PORT: process.env.PORT,
-  DB: process.env.PG_DB,
-  ADMIN_PASS: process.env.ADMIN_PASS ? "(set)" : "(missing)",
-});
-
-// -----------------------------------------
-// 🛠️ Run Migrations Before Serving Requests
+// 🛠️ Migrations
 // -----------------------------------------
 await runMigrations();
 
 // -----------------------------------------
-// ✉️ Contact Form Route
+// ✉️ Contact Form
 // -----------------------------------------
 app.post("/api/contact", async (req, res) => {
   const { name, email, phone, message } = req.body;
-
   if (!name || !email || !phone || !message) {
-    return res.status(400).json({
-      success: false,
-      error: "All fields are required.",
-    });
+    return res.status(400).json({ success: false, error: "All fields required." });
   }
 
   try {
@@ -99,14 +92,10 @@ app.post("/api/contact", async (req, res) => {
       subject: `📬 Contact Form: ${name}`,
       text: `${message}\n\nEmail: ${email}\nPhone: ${phone}`,
     });
-
     res.json({ success: true, message: "Email sent successfully." });
   } catch (error) {
-    console.error("❌ Contact form email failed:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to send email. Please try again later.",
-    });
+    console.error("❌ Contact form failed:", error);
+    res.status(500).json({ success: false, error: "Failed to send email." });
   }
 });
 
@@ -121,21 +110,21 @@ app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
 app.use("/api/orders", orderDiaryRoutes);
 
-// ✅ Dual mount quotes routes
+// Dual mount quotes
 app.use("/api/customers", quotesCustomerRouter);
 app.use("/api/quotes", quotesAdminRouter);
 
 // -----------------------------------------
-// 🌐 Root Endpoint
+// 🌐 Root
 // -----------------------------------------
 app.get("/", (req, res) => {
-  res.send("✅ PJH Web Services API is running successfully on Render.");
+  res.send("✅ PJH Web Services API running on Render");
 });
 
 // -----------------------------------------
-// 🚀 Start Server
+// 🚀 Server Start
 // -----------------------------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server live at: http://localhost:${PORT}`);
+  console.log(`🚀 Backend live at: http://localhost:${PORT}`);
 });
