@@ -15,47 +15,81 @@ import orderDiaryRoutes from "./routes/orderDiary.js";
 import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 
 dotenv.config();
-
 const app = express();
+
+// -----------------------------------------
+// 🌍 CORS Configuration
+// -----------------------------------------
+const allowedOrigins = [
+  "http://localhost:5173", // local dev
+  "https://pjh-web-frontend.vercel.app", // default Vercel deployment
+  "https://pjh-web-frontend-git-main-pj-harris-projects.vercel.app", // preview branch
+  "https://www.pjhwebservices.co.uk", // custom domain
+];
 
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173", // local dev
-      "https://pjh-web-frontend.vercel.app" // your deployed frontend
-    ],
-    methods: ["GET", "POST", "PUT", "DELETE"],
+    origin: (origin, callback) => {
+      // Allow no-origin requests (like Postman, server-side)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      } else {
+        console.warn(`❌ Blocked CORS request from: ${origin}`);
+        return callback(new Error("Not allowed by CORS"), false);
+      }
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
 
-
-app.use(express.json());
-
-// -----------------------------
-// 🧩 Environment summary
-// -----------------------------
-console.log("🧩 Environment loaded:", {
-  PORT: process.env.PORT,
-  PG_DB: process.env.PG_DB,
-  ADMIN_PASS: process.env.ADMIN_PASS ? "(set)" : "(missing)",
-  NODE_ENV: process.env.NODE_ENV,
+// ✅ Add standard security headers
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+  );
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, DELETE, OPTIONS"
+  );
+  next();
 });
 
-// -----------------------------
-// 🛠️ Run migrations before accepting requests
-// -----------------------------
+// -----------------------------------------
+// 🔧 Core Middleware
+// -----------------------------------------
+app.use(express.json());
+
+// -----------------------------------------
+// 🧩 Environment Summary
+// -----------------------------------------
+console.log("🧩 Environment loaded:", {
+  NODE_ENV: process.env.NODE_ENV,
+  PORT: process.env.PORT,
+  DB: process.env.PG_DB,
+  ADMIN_PASS: process.env.ADMIN_PASS ? "(set)" : "(missing)",
+});
+
+// -----------------------------------------
+// 🛠️ Run Migrations Before Serving Requests
+// -----------------------------------------
 await runMigrations();
 
-// -----------------------------
-// ✉️ Contact Form
-// -----------------------------
+// -----------------------------------------
+// ✉️ Contact Form Route
+// -----------------------------------------
 app.post("/api/contact", async (req, res) => {
   const { name, email, phone, message } = req.body;
+
   if (!name || !email || !phone || !message) {
-    return res
-      .status(400)
-      .json({ success: false, error: "All fields are required." });
+    return res.status(400).json({
+      success: false,
+      error: "All fields are required.",
+    });
   }
 
   try {
@@ -65,41 +99,43 @@ app.post("/api/contact", async (req, res) => {
       subject: `📬 Contact Form: ${name}`,
       text: `${message}\n\nEmail: ${email}\nPhone: ${phone}`,
     });
+
     res.json({ success: true, message: "Email sent successfully." });
-  } catch (e) {
-    console.error("❌ Contact form email failed:", e);
-    res.status(500).json({ success: false, error: "Failed to send email." });
+  } catch (error) {
+    console.error("❌ Contact form email failed:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to send email. Please try again later.",
+    });
   }
 });
 
-// -----------------------------
+// -----------------------------------------
 // 📦 API Routes
-// -----------------------------
+// -----------------------------------------
 app.use("/api/admin/quotes", adminQuotesRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/orders", orderRoutes);
-
-// ✅ Quotes routes (dual mount)
-app.use("/api/customers", quotesCustomerRouter); // /api/customers/:id/quotes
-app.use("/api/quotes", quotesAdminRouter);       // /api/quotes/:quoteId etc.
-
-// ✅ Additional modules
 app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
-app.use("/api/orders", orderDiaryRoutes); // backward compatibility
+app.use("/api/orders", orderDiaryRoutes);
 
-// -----------------------------
+// ✅ Dual mount quotes routes
+app.use("/api/customers", quotesCustomerRouter);
+app.use("/api/quotes", quotesAdminRouter);
+
+// -----------------------------------------
 // 🌐 Root Endpoint
-// -----------------------------
+// -----------------------------------------
 app.get("/", (req, res) => {
-  res.send("✅ PJH Web Services API running successfully on Render");
+  res.send("✅ PJH Web Services API is running successfully on Render.");
 });
 
-// -----------------------------
+// -----------------------------------------
 // 🚀 Start Server
-// -----------------------------
+// -----------------------------------------
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`🚀 Server live at: http://localhost:${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`🚀 Server live at: http://localhost:${PORT}`);
+});
