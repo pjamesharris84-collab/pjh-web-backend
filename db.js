@@ -12,16 +12,18 @@ const { Pool } = pkg;
 // -----------------------------
 // Pool Connection Configuration
 // -----------------------------
+
 let connectionOptions;
 
-if (process.env.DATABASE_URL) {
-  // Render / Railway / Supabase style single URL
+if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
+  // ✅ Preferred: Render / Railway / Supabase style single URL
   connectionOptions = {
-    connectionString: process.env.DATABASE_URL,
+    connectionString: process.env.DATABASE_URL.trim(),
     ssl: { rejectUnauthorized: false },
   };
+  console.log("🔌 Using connection string: Render/Hosted DATABASE_URL detected");
 } else {
-  // Manual local .env connection
+  // ✅ Fallback for local development
   connectionOptions = {
     host: process.env.PG_HOST || "localhost",
     user: process.env.PG_USER || "postgres",
@@ -30,15 +32,21 @@ if (process.env.DATABASE_URL) {
     port: process.env.PG_PORT || 5432,
     ssl: process.env.PG_SSL === "true" ? { rejectUnauthorized: false } : false,
   };
+  console.log("🧩 Using local PostgreSQL connection (no DATABASE_URL found)");
 }
 
 export const pool = new Pool(connectionOptions);
 
 pool.on("connect", () => {
-  const host = process.env.PG_HOST || process.env.DATABASE_URL?.split("@")[1]?.split(":")[0] || "localhost";
+  const host = process.env.DATABASE_URL
+    ? process.env.DATABASE_URL.split("@")[1]?.split(":")[0]?.replace("/", "") || "Render DB"
+    : process.env.PG_HOST || "localhost";
   console.log(`📦 Connected to PostgreSQL database (${host})`);
 });
-pool.on("error", (err) => console.error("❌ PostgreSQL Pool Error:", err.message));
+
+pool.on("error", (err) =>
+  console.error("❌ PostgreSQL Pool Error:", err.message)
+);
 
 // ============================================
 // MIGRATIONS (Run Once at Server Startup)
@@ -149,6 +157,7 @@ async function runPaymentMigration() {
 // ============================================
 // Run all migrations safely
 // ============================================
+
 export async function runMigrations() {
   console.log("🚀 Running PostgreSQL migrations...");
 
@@ -185,10 +194,13 @@ export function generateResponseToken() {
   return crypto.randomUUID();
 }
 
-export async function generateQuoteNumber(customerId, businessName = "Customer") {
+export async function generateQuoteNumber(
+  customerId,
+  businessName = "Customer"
+) {
   const safeBusiness = (businessName || "Customer")
-    .replace(/[^a-zA-Z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9\\s-]/g, "")
+    .replace(/\\s+/g, "-")
     .toUpperCase();
 
   const { rows } = await pool.query(
