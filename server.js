@@ -9,6 +9,12 @@ import { runMigrations } from "./db.js";
 
 dotenv.config();
 
+console.log("🧩 Environment check:");
+["ADMIN_PASS", "SMTP_HOST", "SMTP_USER", "TO_EMAIL"].forEach(k =>
+  console.log(`${k}:`, process.env[k] ? "(set)" : "(missing)")
+);
+
+
 const app = express();
 
 // Middleware
