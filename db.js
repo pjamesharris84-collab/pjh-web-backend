@@ -51,6 +51,7 @@ pool.on("error", (err) => {
 // 🧱 MIGRATIONS
 // ============================================
 
+// --- Customers ---
 async function runCustomerMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -71,6 +72,7 @@ async function runCustomerMigration() {
   `);
 }
 
+// --- Packages ---
 async function runPackageMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
@@ -89,6 +91,7 @@ async function runPackageMigration() {
   `);
 }
 
+// --- Quotes ---
 async function runQuoteMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS quotes (
@@ -106,6 +109,9 @@ async function runQuoteMigration() {
       status VARCHAR(20) DEFAULT 'pending' CHECK (
         status IN ('pending','accepted','rejected','amend_requested')
       ),
+      pricing_mode VARCHAR(20) DEFAULT 'oneoff' CHECK (
+        pricing_mode IN ('oneoff','monthly')
+      ),
       feedback TEXT,
       response_token VARCHAR(255) UNIQUE,
       created_at TIMESTAMP DEFAULT NOW(),
@@ -114,6 +120,23 @@ async function runQuoteMigration() {
   `);
 }
 
+// --- Safety Fixes / Schema Patches ---
+async function patchQuotesTable() {
+  // Adds missing columns safely
+  await pool.query(`
+    ALTER TABLE quotes
+    ADD COLUMN IF NOT EXISTS package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL;
+  `);
+
+  await pool.query(`
+    ALTER TABLE quotes
+    ADD COLUMN IF NOT EXISTS pricing_mode VARCHAR(20) DEFAULT 'oneoff' CHECK (
+      pricing_mode IN ('oneoff','monthly')
+    );
+  `);
+}
+
+// --- Quote History ---
 async function runQuoteHistoryMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS quote_history (
@@ -127,6 +150,7 @@ async function runQuoteHistoryMigration() {
   `);
 }
 
+// --- Orders ---
 async function runOrderMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -154,6 +178,7 @@ async function runOrderMigration() {
   `);
 }
 
+// --- Order Diary ---
 async function runOrderDiaryMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS order_diary (
@@ -165,6 +190,7 @@ async function runOrderDiaryMigration() {
   `);
 }
 
+// --- Payments ---
 async function runPaymentMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payments (
@@ -270,11 +296,12 @@ export async function runMigrations() {
     await runCustomerMigration();
     await runPackageMigration();
     await runQuoteMigration();
+    await patchQuotesTable(); // ✅ ensure package_id & pricing_mode exist
     await runQuoteHistoryMigration();
     await runOrderMigration();
     await runOrderDiaryMigration();
     await runPaymentMigration();
-    await seedDefaultPackages(); // 👈 run seeding automatically
+    await seedDefaultPackages();
     await pool.query("COMMIT");
     console.log("✅ All migrations + seeding completed successfully.");
   } catch (err) {
