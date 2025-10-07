@@ -51,7 +51,6 @@ pool.on("error", (err) => {
 // 🧱 MIGRATIONS
 // ============================================
 
-// --- Customers ---
 async function runCustomerMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -72,7 +71,6 @@ async function runCustomerMigration() {
   `);
 }
 
-// --- Packages ---
 async function runPackageMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS packages (
@@ -91,7 +89,6 @@ async function runPackageMigration() {
   `);
 }
 
-// --- Quotes ---
 async function runQuoteMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS quotes (
@@ -117,7 +114,6 @@ async function runQuoteMigration() {
   `);
 }
 
-// --- Quote History ---
 async function runQuoteHistoryMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS quote_history (
@@ -131,7 +127,6 @@ async function runQuoteHistoryMigration() {
   `);
 }
 
-// --- Orders ---
 async function runOrderMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -159,7 +154,6 @@ async function runOrderMigration() {
   `);
 }
 
-// --- Order Diary ---
 async function runOrderDiaryMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS order_diary (
@@ -171,7 +165,6 @@ async function runOrderDiaryMigration() {
   `);
 }
 
-// --- Payments ---
 async function runPaymentMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payments (
@@ -190,6 +183,83 @@ async function runPaymentMigration() {
 }
 
 // ============================================
+// 🌱 SEED DEFAULT PACKAGES
+// ============================================
+
+async function seedDefaultPackages() {
+  const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM packages");
+  if (rows[0].count > 0) {
+    console.log(`🌱 Packages already exist (${rows[0].count} found) — skipping seed.`);
+    return;
+  }
+
+  const packages = [
+    {
+      name: "Starter",
+      tagline: "Perfect for small business websites",
+      price_oneoff: 900,
+      price_monthly: 60,
+      term_months: 24,
+      features: [
+        "4–6 custom pages",
+        "Responsive design",
+        "Basic SEO setup",
+        "Social links",
+        "Hosting setup",
+      ],
+    },
+    {
+      name: "Business",
+      tagline: "For growing companies needing automation",
+      price_oneoff: 2600,
+      price_monthly: 140,
+      term_months: 24,
+      features: [
+        "All Starter features",
+        "Booking system",
+        "Invoicing tools",
+        "CRM core",
+        "On-page SEO",
+      ],
+    },
+    {
+      name: "Premium",
+      tagline: "Full bespoke CRM + integrations",
+      price_oneoff: 6000,
+      price_monthly: 300,
+      term_months: 24,
+      features: [
+        "All Business features",
+        "Advanced automations",
+        "Custom APIs",
+        "Priority support",
+        "SLA included",
+      ],
+    },
+  ];
+
+  for (const pkg of packages) {
+    await pool.query(
+      `
+      INSERT INTO packages
+      (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,NOW(),NOW());
+      `,
+      [
+        pkg.name,
+        pkg.tagline,
+        pkg.price_oneoff,
+        pkg.price_monthly,
+        pkg.term_months,
+        pkg.features,
+      ]
+    );
+  }
+
+  console.log("✅ Seeded default packages successfully.");
+}
+
+// ============================================
 // 🧭 Run all migrations safely
 // ============================================
 
@@ -204,8 +274,9 @@ export async function runMigrations() {
     await runOrderMigration();
     await runOrderDiaryMigration();
     await runPaymentMigration();
+    await seedDefaultPackages(); // 👈 run seeding automatically
     await pool.query("COMMIT");
-    console.log("✅ All migrations completed successfully.");
+    console.log("✅ All migrations + seeding completed successfully.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("❌ Migration error:", err.message);
