@@ -1,5 +1,5 @@
 // ============================================
-// PJH Web Services — Database Setup & Migration Helpers
+// PJH Web Services — Database Setup & Migrations
 // ============================================
 
 import dotenv from "dotenv";
@@ -10,19 +10,17 @@ dotenv.config();
 const { Pool } = pkg;
 
 // -----------------------------
-// 🧩 Connection Configuration
+// 🧩 Connection Setup
 // -----------------------------
 let connectionOptions;
 
 if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
-  // ✅ Hosted connection (Render, Railway, Supabase)
   connectionOptions = {
     connectionString: process.env.DATABASE_URL.trim(),
     ssl: { rejectUnauthorized: false },
   };
   console.log("🔌 Using hosted PostgreSQL via DATABASE_URL");
 } else {
-  // ✅ Local fallback (for dev)
   connectionOptions = {
     host: process.env.PG_HOST || "localhost",
     user: process.env.PG_USER || "postgres",
@@ -31,17 +29,18 @@ if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
     port: process.env.PG_PORT || 5432,
     ssl: process.env.PG_SSL === "true" ? { rejectUnauthorized: false } : false,
   };
-  console.log("🧩 Using local PostgreSQL connection (no DATABASE_URL found)");
+  console.log("🧩 Using local PostgreSQL connection");
 }
 
 export const pool = new Pool(connectionOptions);
 
-// Connection lifecycle events
+// Lifecycle events
 pool.on("connect", () => {
   const host = process.env.DATABASE_URL
-    ? process.env.DATABASE_URL.split("@")[1]?.split(":")[0]?.replace("/", "") || "Render DB"
+    ? process.env.DATABASE_URL.split("@")[1]?.split(":")[0]?.replace("/", "") ||
+      "Render DB"
     : process.env.PG_HOST || "localhost";
-  console.log(`📦 Connected to PostgreSQL database (${host})`);
+  console.log(`📦 Connected to PostgreSQL (${host})`);
 });
 
 pool.on("error", (err) => {
@@ -52,6 +51,7 @@ pool.on("error", (err) => {
 // 🧱 MIGRATIONS
 // ============================================
 
+// --- Customers ---
 async function runCustomerMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -65,21 +65,46 @@ async function runCustomerMigration() {
       city VARCHAR(100),
       county VARCHAR(100),
       postcode VARCHAR(20),
-      notes TEXT
+      notes TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
     );
   `);
 }
 
+// --- Packages ---
+async function runPackageMigration() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS packages (
+      id SERIAL PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      tagline VARCHAR(255),
+      price_oneoff NUMERIC(10,2) NOT NULL,
+      price_monthly NUMERIC(10,2),
+      term_months INTEGER DEFAULT 24,
+      features TEXT[] DEFAULT '{}',
+      discount_percent NUMERIC(5,2) DEFAULT 0,
+      visible BOOLEAN DEFAULT TRUE,
+      created_at TIMESTAMP DEFAULT NOW(),
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
+}
+
+// --- Quotes ---
 async function runQuoteMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS quotes (
       id SERIAL PRIMARY KEY,
       customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,
       quote_number VARCHAR(255) UNIQUE,
       title VARCHAR(255) NOT NULL,
       description TEXT,
       items JSONB NOT NULL DEFAULT '[]',
       deposit NUMERIC(10,2) NOT NULL DEFAULT 0,
+      custom_price NUMERIC(10,2),
+      discount_percent NUMERIC(5,2) DEFAULT 0,
       notes TEXT,
       status VARCHAR(20) DEFAULT 'pending' CHECK (
         status IN ('pending','accepted','rejected','amend_requested')
@@ -92,6 +117,7 @@ async function runQuoteMigration() {
   `);
 }
 
+// --- Quote History ---
 async function runQuoteHistoryMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS quote_history (
@@ -105,6 +131,7 @@ async function runQuoteHistoryMigration() {
   `);
 }
 
+// --- Orders ---
 async function runOrderMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -132,6 +159,7 @@ async function runOrderMigration() {
   `);
 }
 
+// --- Order Diary ---
 async function runOrderDiaryMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS order_diary (
@@ -143,6 +171,7 @@ async function runOrderDiaryMigration() {
   `);
 }
 
+// --- Payments ---
 async function runPaymentMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payments (
@@ -166,25 +195,17 @@ async function runPaymentMigration() {
 
 export async function runMigrations() {
   console.log("🚀 Running PostgreSQL migrations...");
-
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS migration_lock (
-        id INT PRIMARY KEY DEFAULT 1,
-        locked BOOLEAN DEFAULT TRUE
-      );
-    `);
-
     await pool.query("BEGIN");
     await runCustomerMigration();
+    await runPackageMigration();
     await runQuoteMigration();
     await runQuoteHistoryMigration();
     await runOrderMigration();
     await runOrderDiaryMigration();
     await runPaymentMigration();
     await pool.query("COMMIT");
-
-    console.log("✅ All database migrations completed successfully.");
+    console.log("✅ All migrations completed successfully.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("❌ Migration error:", err.message);

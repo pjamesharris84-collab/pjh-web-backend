@@ -61,27 +61,44 @@ function calcSubtotal(items) {
 
 /* ==================== CUSTOMER ROUTES ==================== */
 
-// Create
+// Create Quote
 quotesCustomerRouter.post("/:id/quotes", async (req, res) => {
   const { id } = req.params;
-  const { title, description, items, deposit, notes } = req.body;
+  const {
+    title,
+    description,
+    items,
+    deposit,
+    notes,
+    package_id,
+    custom_price,
+    discount_percent,
+  } = req.body;
 
   try {
-    const { rows: cRows } = await pool.query("SELECT * FROM customers WHERE id=$1", [id]);
-    if (cRows.length === 0) return res.status(404).json({ success: false, error: "Customer not found." });
+    const { rows: cRows } = await pool.query(
+      "SELECT * FROM customers WHERE id=$1",
+      [id]
+    );
+    if (cRows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: "Customer not found." });
 
     const customer = cRows[0];
-    const quoteNumber = await generateQuoteNumber(id, customer.business || customer.name);
+    const quoteNumber = await generateQuoteNumber(
+      id,
+      customer.business || customer.name
+    );
     const responseToken = generateResponseToken();
-
     const safeItems = toArray(items);
 
     const { rows } = await pool.query(
       `
       INSERT INTO quotes
-        (customer_id, quote_number, title, description, items, deposit, notes, status, response_token, created_at, updated_at)
+        (customer_id, quote_number, title, description, items, deposit, notes, package_id, custom_price, discount_percent, status, response_token, created_at, updated_at)
       VALUES
-        ($1,$2,$3,$4,$5,$6,$7,'pending',$8,NOW(),NOW())
+        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,NOW(),NOW())
       RETURNING *;
       `,
       [
@@ -92,6 +109,9 @@ quotesCustomerRouter.post("/:id/quotes", async (req, res) => {
         JSON.stringify(safeItems),
         deposit ?? null,
         notes || "",
+        package_id || null,
+        custom_price || null,
+        discount_percent || 0,
         responseToken,
       ]
     );
@@ -99,11 +119,13 @@ quotesCustomerRouter.post("/:id/quotes", async (req, res) => {
     res.status(201).json({ success: true, quote: rows[0] });
   } catch (err) {
     console.error("❌ Error creating quote:", err);
-    res.status(500).json({ success: false, error: "Failed to create quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to create quote." });
   }
 });
 
-// List
+// List Quotes
 quotesCustomerRouter.get("/:id/quotes", async (req, res) => {
   const { id } = req.params;
   try {
@@ -120,11 +142,13 @@ quotesCustomerRouter.get("/:id/quotes", async (req, res) => {
     res.json({ success: true, quotes });
   } catch (err) {
     console.error("❌ Error fetching quotes:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch quotes." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch quotes." });
   }
 });
 
-// Get one (customer scope)
+// Get Single Quote (Customer)
 quotesCustomerRouter.get("/:id/quotes/:quoteId", async (req, res) => {
   const { id, quoteId } = req.params;
   try {
@@ -132,46 +156,77 @@ quotesCustomerRouter.get("/:id/quotes/:quoteId", async (req, res) => {
       "SELECT * FROM quotes WHERE id=$1 AND customer_id=$2",
       [quoteId, id]
     );
-    if (rows.length === 0) return res.status(404).json({ success: false, error: "Quote not found." });
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: "Quote not found." });
 
     const quote = rows[0];
     quote.items = toArray(quote.items);
     res.json({ success: true, quote });
   } catch (err) {
     console.error("❌ Error fetching quote:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch quote." });
   }
 });
 
-// Update (customer scope)
+// Update Quote (Customer)
 quotesCustomerRouter.put("/:id/quotes/:quoteId", async (req, res) => {
   const { id, quoteId } = req.params;
-  const { title, description, items, deposit, notes, status } = req.body; // status ignored on customer scope
+  const {
+    title,
+    description,
+    items,
+    deposit,
+    notes,
+    package_id,
+    custom_price,
+    discount_percent,
+  } = req.body;
 
   try {
     const { rows } = await pool.query(
       "SELECT id FROM quotes WHERE id=$1 AND customer_id=$2",
       [quoteId, id]
     );
-    if (rows.length === 0) return res.status(404).json({ success: false, error: "Quote not found." });
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: "Quote not found." });
 
     await pool.query(
       `
       UPDATE quotes
-      SET title=$1, description=$2, items=$3, deposit=$4, notes=$5, updated_at=NOW()
-      WHERE id=$6 AND customer_id=$7
+      SET title=$1, description=$2, items=$3, deposit=$4, notes=$5,
+          package_id=$6, custom_price=$7, discount_percent=$8, updated_at=NOW()
+      WHERE id=$9 AND customer_id=$10
       `,
-      [title || "", description || "", JSON.stringify(toArray(items)), deposit ?? null, notes || "", quoteId, id]
+      [
+        title || "",
+        description || "",
+        JSON.stringify(toArray(items)),
+        deposit ?? null,
+        notes || "",
+        package_id || null,
+        custom_price || null,
+        discount_percent || 0,
+        quoteId,
+        id,
+      ]
     );
 
     res.json({ success: true, message: "Quote updated successfully." });
   } catch (err) {
     console.error("❌ Error updating quote:", err);
-    res.status(500).json({ success: false, error: "Failed to update quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to update quote." });
   }
 });
 
-// Delete (customer scope)
+// Delete Quote (Customer)
 quotesCustomerRouter.delete("/:id/quotes/:quoteId", async (req, res) => {
   const { id, quoteId } = req.params;
   try {
@@ -179,18 +234,23 @@ quotesCustomerRouter.delete("/:id/quotes/:quoteId", async (req, res) => {
       "DELETE FROM quotes WHERE id=$1 AND customer_id=$2 RETURNING id",
       [quoteId, id]
     );
-    if (result.rows.length === 0) return res.status(404).json({ success: false, message: "Quote not found." });
+    if (result.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found." });
 
     res.json({ success: true, message: "Quote deleted." });
   } catch (err) {
     console.error("❌ Error deleting quote:", err);
-    res.status(500).json({ success: false, error: "Failed to delete quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to delete quote." });
   }
 });
 
 /* ====================== ADMIN ROUTES ====================== */
 
-// Get one (admin, with customer join and linked order_id if any)
+// Get One (Admin)
 quotesAdminRouter.get("/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
   try {
@@ -205,74 +265,113 @@ quotesAdminRouter.get("/:quoteId", async (req, res) => {
              o.id        AS order_id
       FROM quotes q
       JOIN customers c ON q.customer_id = c.id
-      LEFT JOIN orders   o ON o.quote_id = q.id
+      LEFT JOIN orders o ON o.quote_id = q.id
       WHERE q.id = $1
       `,
       [quoteId]
     );
 
-    if (rows.length === 0) return res.status(404).json({ success: false, message: "Quote not found." });
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found." });
 
     const quote = rows[0];
     quote.items = toArray(quote.items);
     res.json({ success: true, quote });
   } catch (err) {
     console.error("❌ Error fetching global quote:", err);
-    res.status(500).json({ success: false, message: "Failed to fetch quote." });
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to fetch quote." });
   }
 });
 
-// Update (admin)
+// Update Quote (Admin)
 quotesAdminRouter.put("/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
-  const { title, description, items, deposit, notes, status } = req.body;
+  const {
+    title,
+    description,
+    items,
+    deposit,
+    notes,
+    status,
+    package_id,
+    custom_price,
+    discount_percent,
+  } = req.body;
 
   try {
-    const { rows } = await pool.query("SELECT id FROM quotes WHERE id=$1", [quoteId]);
-    if (rows.length === 0) return res.status(404).json({ success: false, error: "Quote not found." });
+    const { rows } = await pool.query("SELECT id FROM quotes WHERE id=$1", [
+      quoteId,
+    ]);
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, error: "Quote not found." });
 
     await pool.query(
       `
       UPDATE quotes
-      SET title=$1, description=$2, items=$3, deposit=$4, notes=$5, status=COALESCE($6,status), updated_at=NOW()
-      WHERE id=$7
+      SET title=$1, description=$2, items=$3, deposit=$4, notes=$5, 
+          status=COALESCE($6,status), package_id=$7, custom_price=$8, discount_percent=$9, updated_at=NOW()
+      WHERE id=$10
       `,
-      [title || "", description || "", JSON.stringify(toArray(items)), deposit ?? null, notes || "", status ?? null, quoteId]
+      [
+        title || "",
+        description || "",
+        JSON.stringify(toArray(items)),
+        deposit ?? null,
+        notes || "",
+        status ?? null,
+        package_id || null,
+        custom_price || null,
+        discount_percent || 0,
+        quoteId,
+      ]
     );
 
     res.json({ success: true, message: "Quote updated successfully." });
   } catch (err) {
     console.error("❌ Error updating global quote:", err);
-    res.status(500).json({ success: false, error: "Failed to update quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to update quote." });
   }
 });
 
-// Delete (admin)
+// Delete Quote (Admin)
 quotesAdminRouter.delete("/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
   try {
-    const result = await pool.query("DELETE FROM quotes WHERE id=$1 RETURNING id", [quoteId]);
-    if (result.rows.length === 0) return res.status(404).json({ success: false, message: "Quote not found." });
+    const result = await pool.query(
+      "DELETE FROM quotes WHERE id=$1 RETURNING id",
+      [quoteId]
+    );
+    if (result.rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found." });
 
     res.json({ success: true, message: "Quote deleted globally." });
   } catch (err) {
     console.error("❌ Error deleting global quote:", err);
-    res.status(500).json({ success: false, error: "Failed to delete quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to delete quote." });
   }
 });
 
-// Email (admin) — generate PDF + send
+// Email (Admin)
 quotesAdminRouter.post("/:quoteId/email", async (req, res) => {
   const { quoteId } = req.params;
   try {
     const { rows } = await pool.query(
       `
-      SELECT q.*,
-             c.name      AS customer_name,
-             c.business  AS customer_business,
-             c.email     AS customer_email,
-             c.address1, c.address2, c.city, c.county, c.postcode,
-             c.phone     AS customer_phone
+      SELECT q.*, c.name AS customer_name, c.business AS customer_business,
+             c.email AS customer_email, c.phone AS customer_phone,
+             c.address1, c.address2, c.city, c.county, c.postcode
       FROM quotes q
       JOIN customers c ON q.customer_id = c.id
       WHERE q.id = $1
@@ -280,13 +379,17 @@ quotesAdminRouter.post("/:quoteId/email", async (req, res) => {
       [quoteId]
     );
 
-    if (rows.length === 0) return res.status(404).json({ success: false, message: "Quote not found." });
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found." });
 
     const quoteRow = rows[0];
     const pdfPath = await generateQuotePDF(quoteRow);
 
     const recipient = quoteRow.customer_email;
-    const displayName = quoteRow.customer_business || quoteRow.customer_name || "Customer";
+    const displayName =
+      quoteRow.customer_business || quoteRow.customer_name || "Customer";
     const subject = `Quote #${quoteRow.quote_number} from PJH Web Services`;
 
     await sendEmail({
@@ -305,19 +408,27 @@ PJH Web Services`,
     res.json({ success: true, message: "Quote emailed successfully." });
   } catch (err) {
     console.error("❌ Error emailing quote:", err);
-    res.status(500).json({ success: false, error: "Failed to email quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to email quote." });
   }
 });
 
 /* -------- Status workflow & Order creation (admin) -------- */
 
-// Accept quote
+// Accept Quote
 quotesAdminRouter.post("/:quoteId/accept", async (req, res) => {
   const { quoteId } = req.params;
   const feedback = req.body?.feedback || null;
   try {
-    const { rows } = await pool.query("UPDATE quotes SET status='accepted', updated_at=NOW() WHERE id=$1 RETURNING *", [quoteId]);
-    if (rows.length === 0) return res.status(404).json({ success: false, message: "Quote not found." });
+    const { rows } = await pool.query(
+      "UPDATE quotes SET status='accepted', updated_at=NOW() WHERE id=$1 RETURNING *",
+      [quoteId]
+    );
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found." });
 
     await pool.query(
       `INSERT INTO quote_history (quote_id, action, feedback, actor) VALUES ($1,'accepted',$2,'admin')`,
@@ -327,17 +438,25 @@ quotesAdminRouter.post("/:quoteId/accept", async (req, res) => {
     res.json({ success: true, quote: rows[0], message: "Quote accepted." });
   } catch (err) {
     console.error("❌ Error accepting quote:", err);
-    res.status(500).json({ success: false, error: "Failed to accept quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to accept quote." });
   }
 });
 
-// Reject quote
+// Reject Quote
 quotesAdminRouter.post("/:quoteId/reject", async (req, res) => {
   const { quoteId } = req.params;
   const feedback = req.body?.feedback || null;
   try {
-    const { rows } = await pool.query("UPDATE quotes SET status='rejected', updated_at=NOW() WHERE id=$1 RETURNING *", [quoteId]);
-    if (rows.length === 0) return res.status(404).json({ success: false, message: "Quote not found." });
+    const { rows } = await pool.query(
+      "UPDATE quotes SET status='rejected', updated_at=NOW() WHERE id=$1 RETURNING *",
+      [quoteId]
+    );
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found." });
 
     await pool.query(
       `INSERT INTO quote_history (quote_id, action, feedback, actor) VALUES ($1,'rejected',$2,'admin')`,
@@ -347,29 +466,43 @@ quotesAdminRouter.post("/:quoteId/reject", async (req, res) => {
     res.json({ success: true, quote: rows[0], message: "Quote rejected." });
   } catch (err) {
     console.error("❌ Error rejecting quote:", err);
-    res.status(500).json({ success: false, error: "Failed to reject quote." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to reject quote." });
   }
 });
 
-// Create order from accepted quote
+// Create Order from Accepted Quote
 quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   const { quoteId } = req.params;
 
   try {
-    // Load quote with customer_id
-    const { rows } = await pool.query("SELECT * FROM quotes WHERE id=$1", [quoteId]);
-    if (rows.length === 0) return res.status(404).json({ success: false, message: "Quote not found." });
+    const { rows } = await pool.query("SELECT * FROM quotes WHERE id=$1", [
+      quoteId,
+    ]);
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found." });
     const q = rows[0];
 
-    // Already has an order?
-    const existing = await pool.query("SELECT id FROM orders WHERE quote_id=$1", [quoteId]);
+    const existing = await pool.query(
+      "SELECT id FROM orders WHERE quote_id=$1",
+      [quoteId]
+    );
     if (existing.rows.length) {
-      return res.json({ success: true, order: existing.rows[0], message: "Order already exists for this quote." });
+      return res.json({
+        success: true,
+        order: existing.rows[0],
+        message: "Order already exists for this quote.",
+      });
     }
 
-    // Must be accepted to create order
     if (q.status !== "accepted") {
-      return res.status(400).json({ success: false, message: "Quote must be accepted before creating an order." });
+      return res.status(400).json({
+        success: false,
+        message: "Quote must be accepted before creating an order.",
+      });
     }
 
     const itemsArr = toArray(q.items);
@@ -382,34 +515,52 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
       INSERT INTO orders
         (customer_id, quote_id, title, description, status, items, tasks, deposit, balance, diary, created_at, updated_at)
       VALUES
-        ($1, $2, $3, $4, 'in_progress', $5, '[]', $6, $7, '[]', NOW(), NOW())
+        ($1,$2,$3,$4,'in_progress',$5,'[]',$6,$7,'[]',NOW(),NOW())
       RETURNING *;
       `,
-      [q.customer_id, quoteId, q.title, q.description || "", JSON.stringify(itemsArr), deposit, balance]
+      [
+        q.customer_id,
+        quoteId,
+        q.title,
+        q.description || "",
+        JSON.stringify(itemsArr),
+        deposit,
+        balance,
+      ]
     );
 
-    // History
     await pool.query(
       `INSERT INTO quote_history (quote_id, action, feedback, actor) VALUES ($1,'converted_to_order',$2,'admin')`,
       [quoteId, null]
     );
 
-    res.json({ success: true, order: ins[0], message: "Order created from quote." });
+    res.json({
+      success: true,
+      order: ins[0],
+      message: "Order created from quote.",
+    });
   } catch (err) {
     console.error("❌ Error creating order from quote:", err);
-    res.status(500).json({ success: false, error: "Failed to create order." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to create order." });
   }
 });
 
-// Get linked order (if any)
+// Get Linked Order
 quotesAdminRouter.get("/:quoteId/order", async (req, res) => {
   const { quoteId } = req.params;
   try {
-    const { rows } = await pool.query("SELECT * FROM orders WHERE quote_id=$1", [quoteId]);
+    const { rows } = await pool.query(
+      "SELECT * FROM orders WHERE quote_id=$1",
+      [quoteId]
+    );
     if (!rows.length) return res.json({ success: true, order: null });
     res.json({ success: true, order: rows[0] });
   } catch (err) {
     console.error("❌ Error fetching linked order:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch linked order." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch linked order." });
   }
 });

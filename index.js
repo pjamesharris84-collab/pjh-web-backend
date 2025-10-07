@@ -18,9 +18,10 @@ import responsesRoutes from "./routes/responses.js";
 import orderDiaryRoutes from "./routes/orderDiary.js";
 import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 
-// ✅ New Stripe integrations
+// ✅ New integrations
 import paymentsRouter from "./routes/payments.js";
 import stripeWebhook from "./routes/stripeWebhook.js";
+import packagesRouter from "./routes/packages.js"; // ✅ Packages management
 
 dotenv.config();
 const app = express();
@@ -34,15 +35,13 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .filter(Boolean);
 
 if (!allowedOrigins.includes("http://localhost:5173")) {
-  allowedOrigins.push("http://localhost:5173"); // always allow local dev
+  allowedOrigins.push("http://localhost:5173"); // Always allow local dev
 }
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
       console.warn(`🚫 Blocked CORS request from: ${origin}`);
       return callback(new Error("Not allowed by CORS"), false);
     },
@@ -51,17 +50,13 @@ app.use(
   })
 );
 
-// ✅ Handle preflight requests explicitly
 app.options("*", (req, res) => {
   res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.header(
     "Access-Control-Allow-Headers",
     "Origin, X-Requested-With, Content-Type, Accept, Authorization"
   );
-  res.header(
-    "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, OPTIONS"
-  );
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.header("Access-Control-Allow-Credentials", "true");
   res.sendStatus(200);
 });
@@ -78,21 +73,21 @@ console.log("🧩 Loaded environment:", {
 });
 
 // -----------------------------------------
-// ⚙️ Middleware (⚠️ Stripe webhook must be raw)
+// ⚙️ Middleware
 // -----------------------------------------
 
-// ✅ Mount Stripe webhook FIRST (raw body required for signature verification)
+// ⚠️ Stripe webhook requires raw body
 app.post(
   "/api/stripe/webhook",
   express.raw({ type: "application/json" }),
   stripeWebhook
 );
 
-// Then normal JSON parsing for everything else
+// All other routes parse JSON normally
 app.use(express.json());
 
 // -----------------------------------------
-// 🛠️ Run database migrations
+// 🧱 Run database migrations
 // -----------------------------------------
 await runMigrations();
 
@@ -102,9 +97,7 @@ await runMigrations();
 app.post("/api/contact", async (req, res) => {
   const { name, email, phone, message } = req.body;
   if (!name || !email || !phone || !message) {
-    return res
-      .status(400)
-      .json({ success: false, error: "All fields required." });
+    return res.status(400).json({ success: false, error: "All fields required." });
   }
 
   try {
@@ -114,9 +107,11 @@ app.post("/api/contact", async (req, res) => {
       subject: `📬 Contact Form: ${name}`,
       text: `${message}\n\nEmail: ${email}\nPhone: ${phone}`,
     });
+
+    console.log(`📧 Contact form received from ${name} (${email})`);
     res.json({ success: true, message: "Email sent successfully." });
   } catch (error) {
-    console.error("❌ Contact form failed:", error);
+    console.error("❌ Contact form failed:", error.message);
     res.status(500).json({ success: false, error: "Failed to send email." });
   }
 });
@@ -125,9 +120,10 @@ app.post("/api/contact", async (req, res) => {
 // 📦 API Routes
 // -----------------------------------------
 
-// ✅ New Stripe payments routes
+// ✅ Stripe / Payments
 app.use("/api/payments", paymentsRouter);
 
+// ✅ Core business logic
 app.use("/api/admin/quotes", adminQuotesRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
@@ -136,17 +132,26 @@ app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
 app.use("/api/orders", orderDiaryRoutes);
 
-// Dual mount quotes
+// ✅ New packages API (fixes dropdown)
+app.use("/api/packages", packagesRouter);
+
+// ✅ Dual-mount quotes
 app.use("/api/customers", quotesCustomerRouter);
 app.use("/api/quotes", quotesAdminRouter);
+
+// ✅ Serve static assets
 app.use(express.static("public"));
 
-
 // -----------------------------------------
-// 🌐 Root Health Check
+// 🌐 Health Check Endpoint
 // -----------------------------------------
 app.get("/", (req, res) => {
-  res.send("✅ PJH Web Services API running with Stripe integration");
+  res.send("✅ PJH Web Services API running with full integrations (Stripe, Packages, CRM)");
+});
+
+// 🧩 Debug route to verify packages router
+app.get("/api/packages/test", (req, res) => {
+  res.json({ success: true, message: "✅ Packages router is active" });
 });
 
 // -----------------------------------------
