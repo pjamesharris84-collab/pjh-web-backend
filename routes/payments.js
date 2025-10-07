@@ -11,9 +11,7 @@ import { sendEmail } from "../utils/email.js";
 dotenv.config();
 
 const router = express.Router();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2024-09-30",
-});
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, );
 
 /**
  * POST /api/payments/create-session

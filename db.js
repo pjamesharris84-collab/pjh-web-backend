@@ -1,5 +1,5 @@
 // ============================================
-// PostgreSQL Database Setup & Migration Helpers
+// PJH Web Services — Database Setup & Migration Helpers
 // ============================================
 
 import dotenv from "dotenv";
@@ -10,20 +10,19 @@ dotenv.config();
 const { Pool } = pkg;
 
 // -----------------------------
-// Pool Connection Configuration
+// 🧩 Connection Configuration
 // -----------------------------
-
 let connectionOptions;
 
 if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
-  // ✅ Preferred: Render / Railway / Supabase style single URL
+  // ✅ Hosted connection (Render, Railway, Supabase)
   connectionOptions = {
     connectionString: process.env.DATABASE_URL.trim(),
     ssl: { rejectUnauthorized: false },
   };
-  console.log("🔌 Using connection string: Render/Hosted DATABASE_URL detected");
+  console.log("🔌 Using hosted PostgreSQL via DATABASE_URL");
 } else {
-  // ✅ Fallback for local development
+  // ✅ Local fallback (for dev)
   connectionOptions = {
     host: process.env.PG_HOST || "localhost",
     user: process.env.PG_USER || "postgres",
@@ -37,6 +36,7 @@ if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
 
 export const pool = new Pool(connectionOptions);
 
+// Connection lifecycle events
 pool.on("connect", () => {
   const host = process.env.DATABASE_URL
     ? process.env.DATABASE_URL.split("@")[1]?.split(":")[0]?.replace("/", "") || "Render DB"
@@ -44,12 +44,12 @@ pool.on("connect", () => {
   console.log(`📦 Connected to PostgreSQL database (${host})`);
 });
 
-pool.on("error", (err) =>
-  console.error("❌ PostgreSQL Pool Error:", err.message)
-);
+pool.on("error", (err) => {
+  console.error("❌ PostgreSQL Pool Error:", err.message);
+});
 
 // ============================================
-// MIGRATIONS (Run Once at Server Startup)
+// 🧱 MIGRATIONS
 // ============================================
 
 async function runCustomerMigration() {
@@ -123,6 +123,9 @@ async function runOrderMigration() {
       diary JSONB NOT NULL DEFAULT '[]',
       deposit_invoiced BOOLEAN DEFAULT false,
       balance_invoiced BOOLEAN DEFAULT false,
+      deposit_paid BOOLEAN DEFAULT false,
+      balance_paid BOOLEAN DEFAULT false,
+      total_paid NUMERIC(10,2) DEFAULT 0,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -149,21 +152,22 @@ async function runPaymentMigration() {
       type VARCHAR(20) CHECK (type IN ('deposit','balance','full')),
       method VARCHAR(50),
       reference VARCHAR(255),
+      stripe_session_id VARCHAR(255),
+      stripe_payment_intent VARCHAR(255),
+      stripe_status VARCHAR(50),
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
 }
 
-
 // ============================================
-// Run all migrations safely
+// 🧭 Run all migrations safely
 // ============================================
 
 export async function runMigrations() {
   console.log("🚀 Running PostgreSQL migrations...");
 
   try {
-    // Prevent duplicate migration runs in concurrent boots
     await pool.query(`
       CREATE TABLE IF NOT EXISTS migration_lock (
         id INT PRIMARY KEY DEFAULT 1,
@@ -188,20 +192,17 @@ export async function runMigrations() {
 }
 
 // ============================================
-// Helper Utilities
+// 🔧 Helper Utilities
 // ============================================
 
 export function generateResponseToken() {
   return crypto.randomUUID();
 }
 
-export async function generateQuoteNumber(
-  customerId,
-  businessName = "Customer"
-) {
+export async function generateQuoteNumber(customerId, businessName = "Customer") {
   const safeBusiness = (businessName || "Customer")
-    .replace(/[^a-zA-Z0-9\\s-]/g, "")
-    .replace(/\\s+/g, "-")
+    .replace(/[^a-zA-Z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
     .toUpperCase();
 
   const { rows } = await pool.query(
