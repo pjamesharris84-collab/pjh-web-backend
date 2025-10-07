@@ -28,12 +28,21 @@ export function paymentRequestTemplate({
   return `
   <html>
     <body style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;background-color:#f4f6f8;padding:40px;margin:0;">
-      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px;margin:auto;background:#ffffff;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,0.08);overflow:hidden;">
+      <table width="100%" cellpadding="0" cellspacing="0" 
+             style="max-width:600px;margin:auto;background:#ffffff;border-radius:12px;
+                    box-shadow:0 4px 15px rgba(0,0,0,0.08);overflow:hidden;">
+        
         <!-- Header -->
         <tr>
           <td style="background:#0d1117;text-align:center;padding:25px;">
-            <img src="${LOGO_BASE64}" alt="PJH Web Services" style="height:60px;display:block;margin:auto;">
-            <h2 style="color:#58a6ff;margin:15px 0 0;font-size:22px;">Secure ${type} Payment Link</h2>
+            <img 
+              src="${LOGO_BASE64}" 
+              alt="PJH Web Services" 
+              width="140" height="auto"
+              style="display:block;margin:auto;max-width:140px;height:auto;">
+            <h2 style="color:#58a6ff;margin:15px 0 0;font-size:22px;">
+              Secure ${type} Payment Link
+            </h2>
           </td>
         </tr>
 
@@ -63,7 +72,8 @@ export function paymentRequestTemplate({
             <p style="color:#777777;font-size:13px;margin-top:30px;line-height:1.5;">
               Kind regards,<br>
               <strong>PJH Web Services</strong><br>
-              <a href="https://www.pjhwebservices.co.uk" style="color:#007bff;text-decoration:none;">www.pjhwebservices.co.uk</a>
+              <a href="https://www.pjhwebservices.co.uk" 
+                 style="color:#007bff;text-decoration:none;">www.pjhwebservices.co.uk</a>
             </p>
           </td>
         </tr>
