@@ -1,6 +1,11 @@
-// ============================================
-// PJH Web Services — Database Setup & Migrations
-// ============================================
+/**
+ * ============================================================
+ * PJH Web Services — Database Setup & Migrations
+ * ============================================================
+ * Centralised PostgreSQL pool setup and schema management.
+ * Handles full migrations, schema patching, and seeding.
+ * ============================================================
+ */
 
 import dotenv from "dotenv";
 import pkg from "pg";
@@ -9,9 +14,9 @@ dotenv.config();
 
 const { Pool } = pkg;
 
-// -----------------------------
-// 🧩 Connection Setup
-// -----------------------------
+/* ------------------------------------------------------------
+   🧩 CONNECTION SETUP
+------------------------------------------------------------ */
 let connectionOptions;
 
 if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
@@ -34,7 +39,9 @@ if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
 
 export const pool = new Pool(connectionOptions);
 
-// Lifecycle events
+/* ------------------------------------------------------------
+   🧠 LIFECYCLE EVENTS
+------------------------------------------------------------ */
 pool.on("connect", () => {
   const host = process.env.DATABASE_URL
     ? process.env.DATABASE_URL.split("@")[1]?.split(":")[0]?.replace("/", "") ||
@@ -47,9 +54,9 @@ pool.on("error", (err) => {
   console.error("❌ PostgreSQL Pool Error:", err.message);
 });
 
-// ============================================
-// 🧱 MIGRATIONS
-// ============================================
+/* ------------------------------------------------------------
+   🧱 MIGRATIONS
+------------------------------------------------------------ */
 
 // --- Customers ---
 async function runCustomerMigration() {
@@ -120,33 +127,25 @@ async function runQuoteMigration() {
   `);
 }
 
-// --- Schema Patch: Ensure Columns Exist ---
+// --- Quotes Table Patching (for older DBs) ---
 async function patchQuotesTable() {
   await pool.query(`
     ALTER TABLE quotes
     ADD COLUMN IF NOT EXISTS package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL;
   `);
-
   await pool.query(`
     ALTER TABLE quotes
-    ADD COLUMN IF NOT EXISTS pricing_mode VARCHAR(20) DEFAULT 'oneoff' CHECK (
-      pricing_mode IN ('oneoff','monthly')
-    );
+    ADD COLUMN IF NOT EXISTS pricing_mode VARCHAR(20)
+    DEFAULT 'oneoff' CHECK (pricing_mode IN ('oneoff','monthly'));
   `);
-}
-
-// --- Fix: Add missing financial columns ---
-async function patchQuoteColumns() {
   await pool.query(`
     ALTER TABLE quotes
     ADD COLUMN IF NOT EXISTS custom_price NUMERIC(10,2);
   `);
-
   await pool.query(`
     ALTER TABLE quotes
     ADD COLUMN IF NOT EXISTS deposit NUMERIC(10,2) DEFAULT 0;
   `);
-
   await pool.query(`
     ALTER TABLE quotes
     ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(5,2) DEFAULT 0;
@@ -225,10 +224,26 @@ async function runPaymentMigration() {
   `);
 }
 
-// ============================================
-// 🌱 SEED DEFAULT PACKAGES
-// ============================================
+/* ------------------------------------------------------------
+   🩹 PATCH: Ensure timestamps exist (for legacy tables)
+------------------------------------------------------------ */
+async function patchMissingTimestamps() {
+  const tables = ["customers", "packages", "quotes", "orders"];
+  for (const table of tables) {
+    await pool.query(`
+      ALTER TABLE ${table}
+      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+    `);
+    await pool.query(`
+      ALTER TABLE ${table}
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+    `);
+  }
+}
 
+/* ------------------------------------------------------------
+   🌱 SEED DEFAULT PACKAGES
+------------------------------------------------------------ */
 async function seedDefaultPackages() {
   const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM packages");
   if (rows[0].count > 0) {
@@ -302,10 +317,9 @@ async function seedDefaultPackages() {
   console.log("✅ Seeded default packages successfully.");
 }
 
-// ============================================
-// 🧭 Run all migrations safely
-// ============================================
-
+/* ------------------------------------------------------------
+   🧭 RUN ALL MIGRATIONS
+------------------------------------------------------------ */
 export async function runMigrations() {
   console.log("🚀 Running PostgreSQL migrations...");
   try {
@@ -314,24 +328,23 @@ export async function runMigrations() {
     await runPackageMigration();
     await runQuoteMigration();
     await patchQuotesTable();
-    await patchQuoteColumns(); // ✅ fixes custom_price and deposit columns
     await runQuoteHistoryMigration();
     await runOrderMigration();
     await runOrderDiaryMigration();
     await runPaymentMigration();
+    await patchMissingTimestamps(); // ✅ Ensures legacy tables are compatible
     await seedDefaultPackages();
     await pool.query("COMMIT");
-    console.log("✅ All migrations + schema patches + seeding completed successfully.");
+    console.log("✅ All migrations + patches + seeding completed successfully.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("❌ Migration error:", err.message);
   }
 }
 
-// ============================================
-// 🔧 Helper Utilities
-// ============================================
-
+/* ------------------------------------------------------------
+   🔧 UTILITIES
+------------------------------------------------------------ */
 export function generateResponseToken() {
   return crypto.randomUUID();
 }
