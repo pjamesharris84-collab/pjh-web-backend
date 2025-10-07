@@ -120,9 +120,8 @@ async function runQuoteMigration() {
   `);
 }
 
-// --- Safety Fixes / Schema Patches ---
+// --- Schema Patch: Ensure Columns Exist ---
 async function patchQuotesTable() {
-  // Adds missing columns safely
   await pool.query(`
     ALTER TABLE quotes
     ADD COLUMN IF NOT EXISTS package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL;
@@ -133,6 +132,24 @@ async function patchQuotesTable() {
     ADD COLUMN IF NOT EXISTS pricing_mode VARCHAR(20) DEFAULT 'oneoff' CHECK (
       pricing_mode IN ('oneoff','monthly')
     );
+  `);
+}
+
+// --- Fix: Add missing financial columns ---
+async function patchQuoteColumns() {
+  await pool.query(`
+    ALTER TABLE quotes
+    ADD COLUMN IF NOT EXISTS custom_price NUMERIC(10,2);
+  `);
+
+  await pool.query(`
+    ALTER TABLE quotes
+    ADD COLUMN IF NOT EXISTS deposit NUMERIC(10,2) DEFAULT 0;
+  `);
+
+  await pool.query(`
+    ALTER TABLE quotes
+    ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(5,2) DEFAULT 0;
   `);
 }
 
@@ -296,14 +313,15 @@ export async function runMigrations() {
     await runCustomerMigration();
     await runPackageMigration();
     await runQuoteMigration();
-    await patchQuotesTable(); // ✅ ensure package_id & pricing_mode exist
+    await patchQuotesTable();
+    await patchQuoteColumns(); // ✅ fixes custom_price and deposit columns
     await runQuoteHistoryMigration();
     await runOrderMigration();
     await runOrderDiaryMigration();
     await runPaymentMigration();
     await seedDefaultPackages();
     await pool.query("COMMIT");
-    console.log("✅ All migrations + seeding completed successfully.");
+    console.log("✅ All migrations + schema patches + seeding completed successfully.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("❌ Migration error:", err.message);
