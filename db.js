@@ -154,6 +154,7 @@ async function runPaymentMigration() {
   `);
 }
 
+
 // ============================================
 // Run all migrations safely
 // ============================================
