@@ -18,7 +18,7 @@ export function paymentRequestTemplate({ customerName, orderTitle, amount, link,
       <table width="100%" style="max-width:600px;margin:auto;background:#fff;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,0.05);overflow:hidden;">
         <tr>
           <td style="background:#0d1117;text-align:center;padding:20px;">
-            <img src="https://www.pjhwebservices.co.uk/assets/logo-light.png" alt="PJH Web Services" style="height:60px;">
+            <img src="https://pjh-web-backend-1.onrender.com/pjh-logo-dark.png" alt="PJH Web Services" style="height:60px;">
             <h2 style="color:#58a6ff;margin:10px 0 0;">Secure ${type} Payment Link</h2>
           </td>;
         </tr>

@@ -139,6 +139,8 @@ app.use("/api/orders", orderDiaryRoutes);
 // Dual mount quotes
 app.use("/api/customers", quotesCustomerRouter);
 app.use("/api/quotes", quotesAdminRouter);
+app.use(express.static("public"));
+
 
 // -----------------------------------------
 // 🌐 Root Health Check
