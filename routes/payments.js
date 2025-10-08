@@ -1,15 +1,3 @@
-/**
- * ============================================================
- * PJH Web Services — Unified Stripe Payments & Direct Debit API
- * ============================================================
- * Handles:
- *  - Card payments (deposit/balance)
- *  - Direct Debit setup (BACS)
- *  - Stripe webhooks for reconciliation and receipts
- *  - Automatic email notifications
- * ============================================================
- */
-
 import express from "express";
 import Stripe from "stripe";
 import dotenv from "dotenv";
@@ -26,10 +14,19 @@ dotenv.config();
 
 const router = express.Router();
 
-// ✅ Pin Stripe to a stable API version (avoid preview “clover”)
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2024-08-20",
-});
+// ✅ Let Stripe auto-select your account’s API version (don’t pin)
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// Log version for clarity
+(async () => {
+  try {
+    const info = await stripe.accounts.retrieve();
+    console.log(`🔗 Stripe connected (API version: ${stripe.getApiField("version") || "default"})`);
+  } catch {
+    console.log("🔗 Stripe initialized (version auto-detected)");
+  }
+})();
+
 
 const FRONTEND_URL =
   process.env.FRONTEND_URL ||
