@@ -3,8 +3,11 @@
  * PJH Web Services — Database Setup & Migrations
  * ============================================================
  * Centralised PostgreSQL pool setup and schema management.
- * Handles full migrations, schema patching, and seeding.
- * Now includes Stripe Direct Debit + recurring payment tracking.
+ * Handles:
+ *   • Initial migrations
+ *   • Schema patching
+ *   • Default package seeding
+ *   • Stripe Direct Debit + recurring payment tracking
  * ============================================================
  */
 
@@ -74,10 +77,14 @@ async function runCustomerMigration() {
       county VARCHAR(100),
       postcode VARCHAR(20),
       notes TEXT,
+
+      -- 💳 Stripe / Direct Debit fields
       stripe_customer_id TEXT,
       stripe_mandate_id TEXT,
-      payment_method VARCHAR(50) DEFAULT 'card' CHECK (payment_method IN ('card','direct_debit','mixed')),
       direct_debit_active BOOLEAN DEFAULT false,
+      payment_method VARCHAR(50) DEFAULT 'card'
+        CHECK (payment_method IN ('card','direct_debit','mixed')),
+
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -119,12 +126,10 @@ async function runQuoteMigration() {
       custom_price NUMERIC(10,2),
       discount_percent NUMERIC(5,2) DEFAULT 0,
       notes TEXT,
-      status VARCHAR(20) DEFAULT 'pending' CHECK (
-        status IN ('pending','accepted','rejected','amend_requested')
-      ),
-      pricing_mode VARCHAR(20) DEFAULT 'oneoff' CHECK (
-        pricing_mode IN ('oneoff','monthly')
-      ),
+      status VARCHAR(20) DEFAULT 'pending'
+        CHECK (status IN ('pending','accepted','rejected','amend_requested')),
+      pricing_mode VARCHAR(20) DEFAULT 'oneoff'
+        CHECK (pricing_mode IN ('oneoff','monthly')),
       feedback TEXT,
       response_token VARCHAR(255) UNIQUE,
       created_at TIMESTAMP DEFAULT NOW(),
@@ -142,9 +147,8 @@ async function runOrderMigration() {
       quote_id INTEGER UNIQUE REFERENCES quotes(id) ON DELETE SET NULL,
       title VARCHAR(255) NOT NULL,
       description TEXT,
-      status VARCHAR(20) DEFAULT 'in_progress' CHECK (
-        status IN ('in_progress','completed','cancelled')
-      ),
+      status VARCHAR(20) DEFAULT 'in_progress'
+        CHECK (status IN ('in_progress','completed','cancelled')),
       items JSONB NOT NULL DEFAULT '[]',
       tasks JSONB NOT NULL DEFAULT '[]',
       deposit NUMERIC(10,2) DEFAULT 0,
@@ -155,10 +159,13 @@ async function runOrderMigration() {
       deposit_paid BOOLEAN DEFAULT false,
       balance_paid BOOLEAN DEFAULT false,
       total_paid NUMERIC(10,2) DEFAULT 0,
+
+      -- 🔁 Recurring payments
       recurring BOOLEAN DEFAULT false,
       recurring_amount NUMERIC(10,2),
       recurring_interval VARCHAR(20) DEFAULT 'monthly',
       recurring_active BOOLEAN DEFAULT false,
+
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -170,28 +177,33 @@ async function runPaymentMigration() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payments (
       id SERIAL PRIMARY KEY,
-      order_id INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      order_id INT REFERENCES orders(id) ON DELETE CASCADE,
       customer_id INT REFERENCES customers(id) ON DELETE SET NULL,
       amount NUMERIC(10,2) NOT NULL,
-      type VARCHAR(20) CHECK (type IN ('deposit','balance','full','monthly')),
+      type VARCHAR(20)
+        CHECK (type IN ('deposit','balance','full','monthly')),
       method VARCHAR(50),
       reference VARCHAR(255),
       notes TEXT,
       recorded_by VARCHAR(100),
       reconciled BOOLEAN DEFAULT false,
+
+      -- 🔗 Stripe tracking
       stripe_session_id VARCHAR(255),
       stripe_payment_intent VARCHAR(255),
-      stripe_event_id VARCHAR(255),
+      stripe_event_id VARCHAR(255) UNIQUE,
       stripe_status VARCHAR(50),
-      status VARCHAR(50) DEFAULT 'pending' CHECK (
-        status IN ('pending','paid','failed','cancelled','refunded')
-      ),
+
+      status VARCHAR(50) DEFAULT 'pending'
+        CHECK (status IN ('pending','paid','failed','cancelled','refunded')),
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
 }
 
-// --- Seed Default Packages (with legal guardrails) ---
+/* ------------------------------------------------------------
+   🌱 SEED DEFAULT PACKAGES
+------------------------------------------------------------ */
 async function seedDefaultPackages() {
   const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM packages");
   if (rows[0].count > 0) {
@@ -249,8 +261,8 @@ async function seedDefaultPackages() {
 
     await pool.query(
       `INSERT INTO packages
-      (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails)
-      VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb);`,
+       (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails)
+       VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb);`,
       [
         pkg.name,
         pkg.tagline,
@@ -296,8 +308,8 @@ export function generateResponseToken() {
 
 export async function generateQuoteNumber(customerId, businessName = "Customer") {
   const safeBusiness = (businessName || "Customer")
-    .replace(/[^a-zA-Z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9\\s-]/g, "")
+    .replace(/\\s+/g, "-")
     .toUpperCase();
 
   const { rows } = await pool.query(
