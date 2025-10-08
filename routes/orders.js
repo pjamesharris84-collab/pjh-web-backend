@@ -32,9 +32,8 @@ const FRONTEND_URL =
 
 /* ============================================================
    🧱 FETCH ALL ORDERS
-   GET /api/orders
 ============================================================ */
-router.get("/", async (req, res) => {
+router.get("/", async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT 
@@ -48,28 +47,22 @@ router.get("/", async (req, res) => {
       JOIN customers c ON o.customer_id = c.id
       ORDER BY o.created_at DESC;
     `);
-
     res.json({ success: true, data: rows });
   } catch (err) {
-    console.error("❌ Error fetching all orders:", err);
+    console.error("❌ Error fetching orders:", err);
     res.status(500).json({ success: false, error: "Failed to fetch orders." });
   }
 });
 
 /* ============================================================
    🧩 FETCH ORDERS BY CUSTOMER
-   GET /api/customers/:customerId/orders
 ============================================================ */
 router.get("/customers/:customerId/orders", async (req, res) => {
+  const { customerId } = req.params;
   try {
-    const { customerId } = req.params;
     const { rows } = await pool.query(
       `
-      SELECT 
-        o.*, 
-        c.business AS customer_business,
-        c.name     AS customer_name,
-        c.email    AS customer_email
+      SELECT o.*, c.business, c.name, c.email
       FROM orders o
       JOIN customers c ON o.customer_id = c.id
       WHERE o.customer_id = $1
@@ -77,7 +70,6 @@ router.get("/customers/:customerId/orders", async (req, res) => {
       `,
       [customerId]
     );
-
     res.json({ success: true, orders: rows });
   } catch (err) {
     console.error("❌ Error fetching orders by customer:", err);
@@ -89,7 +81,6 @@ router.get("/customers/:customerId/orders", async (req, res) => {
 
 /* ============================================================
    🔍 FETCH SINGLE ORDER
-   GET /api/orders/:id
 ============================================================ */
 router.get("/:id", async (req, res) => {
   try {
@@ -109,7 +100,7 @@ router.get("/:id", async (req, res) => {
       [req.params.id]
     );
 
-    if (rows.length === 0)
+    if (!rows.length)
       return res.status(404).json({ success: false, error: "Order not found." });
 
     res.json({ success: true, data: rows[0] });
@@ -121,38 +112,39 @@ router.get("/:id", async (req, res) => {
 
 /* ============================================================
    🪄 CREATE ORDER FROM QUOTE
-   POST /api/orders/from-quote/:quoteId
 ============================================================ */
 router.post("/from-quote/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
   try {
-    // Check existing
     const existing = await pool.query(
       "SELECT * FROM orders WHERE quote_id = $1 LIMIT 1",
       [quoteId]
     );
-    if (existing.rows.length > 0)
+    if (existing.rows.length)
       return res.json({
         success: true,
         message: "Order already exists for this quote.",
         data: existing.rows[0],
       });
 
-    // Fetch quote
     const quoteRes = await pool.query("SELECT * FROM quotes WHERE id = $1", [
       quoteId,
     ]);
-    if (quoteRes.rows.length === 0)
+    if (!quoteRes.rows.length)
       return res.status(404).json({ success: false, error: "Quote not found." });
 
     const quote = quoteRes.rows[0];
-    const totalItems = (quote.items || []).reduce(
-      (sum, i) => sum + (i.total || 0),
+    const items = Array.isArray(quote.items)
+      ? quote.items
+      : JSON.parse(quote.items || "[]");
+    const total = items.reduce(
+      (sum, i) => sum + Number(i.qty ?? 1) * Number(i.unit_price ?? i.price ?? 0),
       0
     );
-    const balance = totalItems - (quote.deposit || 0);
+    const deposit = Number(quote.deposit ?? total * 0.5);
+    const balance = total - deposit;
 
-    const newOrder = await pool.query(
+    const { rows } = await pool.query(
       `
       INSERT INTO orders (
         customer_id, quote_id, title, description, status,
@@ -166,8 +158,8 @@ router.post("/from-quote/:quoteId", async (req, res) => {
         quote.id,
         quote.title,
         quote.description || "",
-        JSON.stringify(quote.items || []),
-        quote.deposit || 0,
+        JSON.stringify(items),
+        deposit,
         balance,
       ]
     );
@@ -175,7 +167,7 @@ router.post("/from-quote/:quoteId", async (req, res) => {
     res.json({
       success: true,
       message: "✅ Order created successfully from quote.",
-      data: newOrder.rows[0],
+      data: rows[0],
     });
   } catch (err) {
     console.error("❌ Error creating order:", err);
@@ -185,7 +177,6 @@ router.post("/from-quote/:quoteId", async (req, res) => {
 
 /* ============================================================
    💳 GENERATE PAYMENT LINK
-   POST /api/orders/:id/payment-link/:type
 ============================================================ */
 router.post("/:id/payment-link/:type", async (req, res) => {
   const { id, type } = req.params;
@@ -202,7 +193,7 @@ router.post("/:id/payment-link/:type", async (req, res) => {
       `,
       [id]
     );
-    if (rows.length === 0)
+    if (!rows.length)
       return res.status(404).json({ success: false, error: "Order not found." });
 
     const order = rows[0];
@@ -222,9 +213,7 @@ router.post("/:id/payment-link/:type", async (req, res) => {
           price_data: {
             currency: "gbp",
             product_data: {
-              name: `${
-                type === "deposit" ? "Deposit" : "Balance"
-              } — ${order.title}`,
+              name: `${type === "deposit" ? "Deposit" : "Balance"} — ${order.title}`,
             },
             unit_amount: Math.round(amount * 100),
           },
@@ -237,8 +226,6 @@ router.post("/:id/payment-link/:type", async (req, res) => {
       customer_email: order.email,
     });
 
-    const paymentUrl = session.url;
-
     await sendEmail({
       to: order.email,
       subject: `Secure ${type} payment link — ${order.title}`,
@@ -246,18 +233,18 @@ router.post("/:id/payment-link/:type", async (req, res) => {
         customerName: order.name,
         orderTitle: order.title,
         amount,
-        link: paymentUrl,
+        link: session.url,
         type,
       }),
       text: `Please complete your ${type} payment of £${amount.toFixed(
         2
-      )} using this link:\n${paymentUrl}`,
+      )} using this link:\n${session.url}`,
     });
 
     res.json({
       success: true,
       message: "Payment link created & emailed.",
-      url: paymentUrl,
+      url: session.url,
     });
   } catch (err) {
     console.error("❌ Error creating payment link:", err);
@@ -267,7 +254,6 @@ router.post("/:id/payment-link/:type", async (req, res) => {
 
 /* ============================================================
    💰 RECORD PAYMENT
-   POST /api/orders/:id/payments
 ============================================================ */
 router.post("/:id/payments", async (req, res) => {
   const { id } = req.params;
@@ -275,7 +261,7 @@ router.post("/:id/payments", async (req, res) => {
 
   try {
     const orderRes = await pool.query("SELECT * FROM orders WHERE id=$1", [id]);
-    if (orderRes.rows.length === 0)
+    if (!orderRes.rows.length)
       return res.status(404).json({ success: false, error: "Order not found." });
 
     await pool.query(
@@ -298,7 +284,6 @@ router.post("/:id/payments", async (req, res) => {
 
 /* ============================================================
    📜 GET PAYMENTS FOR ORDER
-   GET /api/orders/:id/payments
 ============================================================ */
 router.get("/:id/payments", async (req, res) => {
   try {
@@ -306,7 +291,7 @@ router.get("/:id/payments", async (req, res) => {
       "SELECT * FROM orders WHERE id=$1",
       [req.params.id]
     );
-    if (orderRows.length === 0)
+    if (!orderRows.length)
       return res.status(404).json({ success: false, error: "Order not found." });
 
     const order = orderRows[0];
@@ -326,12 +311,14 @@ router.get("/:id/payments", async (req, res) => {
 });
 
 /* ============================================================
-   🧾 SEND INVOICE EMAIL (Deposit/Balance)
-   POST /api/orders/:id/invoice/:type
+   🧾 SEND INVOICE (Deposit/Balance)
 ============================================================ */
 router.post("/:id/invoice/:type", async (req, res) => {
   const { id, type } = req.params;
   const invoiceType = type.toLowerCase();
+
+  if (!["deposit", "balance"].includes(invoiceType))
+    return res.status(400).json({ success: false, error: "Invalid invoice type." });
 
   try {
     const { rows } = await pool.query(
@@ -344,7 +331,7 @@ router.post("/:id/invoice/:type", async (req, res) => {
       [id]
     );
 
-    if (rows.length === 0)
+    if (!rows.length)
       return res.status(404).json({ success: false, error: "Order not found." });
 
     const order = rows[0];
