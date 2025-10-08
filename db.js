@@ -4,6 +4,7 @@
  * ============================================================
  * Centralised PostgreSQL pool setup and schema management.
  * Handles full migrations, schema patching, and seeding.
+ * Now includes Stripe Direct Debit + recurring payment tracking.
  * ============================================================
  */
 
@@ -73,6 +74,10 @@ async function runCustomerMigration() {
       county VARCHAR(100),
       postcode VARCHAR(20),
       notes TEXT,
+      stripe_customer_id TEXT,
+      stripe_mandate_id TEXT,
+      payment_method VARCHAR(50) DEFAULT 'card' CHECK (payment_method IN ('card','direct_debit','mixed')),
+      direct_debit_active BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -96,14 +101,6 @@ async function runPackageMigration() {
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
-  `);
-}
-
-// --- Packages Table Patch (new field) ---
-async function patchPackagesGuardrails() {
-  await pool.query(`
-    ALTER TABLE packages
-    ADD COLUMN IF NOT EXISTS pricing_guardrails JSONB DEFAULT '{}'::jsonb;
   `);
 }
 
@@ -136,45 +133,6 @@ async function runQuoteMigration() {
   `);
 }
 
-// --- Quotes Table Patching (for older DBs) ---
-async function patchQuotesTable() {
-  await pool.query(`
-    ALTER TABLE quotes
-    ADD COLUMN IF NOT EXISTS package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL;
-  `);
-  await pool.query(`
-    ALTER TABLE quotes
-    ADD COLUMN IF NOT EXISTS pricing_mode VARCHAR(20)
-    DEFAULT 'oneoff' CHECK (pricing_mode IN ('oneoff','monthly'));
-  `);
-  await pool.query(`
-    ALTER TABLE quotes
-    ADD COLUMN IF NOT EXISTS custom_price NUMERIC(10,2);
-  `);
-  await pool.query(`
-    ALTER TABLE quotes
-    ADD COLUMN IF NOT EXISTS deposit NUMERIC(10,2) DEFAULT 0;
-  `);
-  await pool.query(`
-    ALTER TABLE quotes
-    ADD COLUMN IF NOT EXISTS discount_percent NUMERIC(5,2) DEFAULT 0;
-  `);
-}
-
-// --- Quote History ---
-async function runQuoteHistoryMigration() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS quote_history (
-      id SERIAL PRIMARY KEY,
-      quote_id INT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
-      action VARCHAR(50) NOT NULL,
-      feedback TEXT,
-      actor VARCHAR(50) NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-}
-
 // --- Orders ---
 async function runOrderMigration() {
   await pool.query(`
@@ -197,20 +155,12 @@ async function runOrderMigration() {
       deposit_paid BOOLEAN DEFAULT false,
       balance_paid BOOLEAN DEFAULT false,
       total_paid NUMERIC(10,2) DEFAULT 0,
+      recurring BOOLEAN DEFAULT false,
+      recurring_amount NUMERIC(10,2),
+      recurring_interval VARCHAR(20) DEFAULT 'monthly',
+      recurring_active BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-}
-
-// --- Order Diary ---
-async function runOrderDiaryMigration() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS order_diary (
-      id SERIAL PRIMARY KEY,
-      order_id INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-      note TEXT NOT NULL,
-      date TIMESTAMP DEFAULT NOW()
     );
   `);
 }
@@ -221,68 +171,42 @@ async function runPaymentMigration() {
     CREATE TABLE IF NOT EXISTS payments (
       id SERIAL PRIMARY KEY,
       order_id INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      customer_id INT REFERENCES customers(id) ON DELETE SET NULL,
       amount NUMERIC(10,2) NOT NULL,
-      type VARCHAR(20) CHECK (type IN ('deposit','balance','full')),
+      type VARCHAR(20) CHECK (type IN ('deposit','balance','full','monthly')),
       method VARCHAR(50),
       reference VARCHAR(255),
+      notes TEXT,
+      recorded_by VARCHAR(100),
+      reconciled BOOLEAN DEFAULT false,
       stripe_session_id VARCHAR(255),
       stripe_payment_intent VARCHAR(255),
+      stripe_event_id VARCHAR(255),
       stripe_status VARCHAR(50),
+      status VARCHAR(50) DEFAULT 'pending' CHECK (
+        status IN ('pending','paid','failed','cancelled','refunded')
+      ),
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
 }
 
-/* ------------------------------------------------------------
-   🩹 PATCH: Ensure timestamps exist (for legacy tables)
------------------------------------------------------------- */
-async function patchMissingTimestamps() {
-  const tables = ["customers", "packages", "quotes", "orders"];
-  for (const table of tables) {
-    await pool.query(`
-      ALTER TABLE ${table}
-      ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
-    `);
-    await pool.query(`
-      ALTER TABLE ${table}
-      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
-    `);
-  }
-}
-
-/* ------------------------------------------------------------
-   🌱 SEED DEFAULT PACKAGES
------------------------------------------------------------- */
+// --- Seed Default Packages (with legal guardrails) ---
 async function seedDefaultPackages() {
   const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM packages");
   if (rows[0].count > 0) {
-    console.log(`🌱 Packages already exist (${rows[0].count} found) — skipping seed.`);
+    console.log(`🌱 Packages already exist (${rows[0].count}) — skipping seed.`);
     return;
   }
 
-  const packages = [
+  const defaults = [
     {
       name: "Starter",
       tagline: "Perfect for small business websites",
       price_oneoff: 900,
       price_monthly: 60,
       term_months: 24,
-      features: [
-        "4–6 custom pages",
-        "Responsive design",
-        "Basic SEO setup",
-        "Social links",
-        "Hosting setup",
-      ],
-      pricing_guardrails: {
-        require_deposit_months: 1,
-        min_term_months: 24,
-        early_exit_fee_pct: 40,
-        ownership_until_paid: true,
-        late_fee_pct: 5,
-        default_payment_method: "direct_debit",
-        tcs_version: "2025-01",
-      },
+      features: ["4–6 pages", "Responsive design", "Basic SEO", "Hosting setup"],
     },
     {
       name: "Business",
@@ -295,17 +219,7 @@ async function seedDefaultPackages() {
         "Booking system",
         "Invoicing tools",
         "CRM core",
-        "On-page SEO",
       ],
-      pricing_guardrails: {
-        require_deposit_months: 1,
-        min_term_months: 24,
-        early_exit_fee_pct: 40,
-        ownership_until_paid: true,
-        late_fee_pct: 5,
-        default_payment_method: "direct_debit",
-        tcs_version: "2025-01",
-      },
     },
     {
       name: "Premium",
@@ -315,30 +229,28 @@ async function seedDefaultPackages() {
       term_months: 24,
       features: [
         "All Business features",
-        "Advanced automations",
         "Custom APIs",
+        "Automations",
         "Priority support",
-        "SLA included",
       ],
-      pricing_guardrails: {
-        require_deposit_months: 1,
-        min_term_months: 24,
-        early_exit_fee_pct: 40,
-        ownership_until_paid: true,
-        late_fee_pct: 5,
-        default_payment_method: "direct_debit",
-        tcs_version: "2025-01",
-      },
     },
   ];
 
-  for (const pkg of packages) {
+  for (const pkg of defaults) {
+    const guardrails = {
+      require_deposit_months: 1,
+      min_term_months: pkg.term_months,
+      early_exit_fee_pct: 40,
+      ownership_until_paid: true,
+      late_fee_pct: 5,
+      default_payment_method: "direct_debit",
+      tcs_version: "2025-01",
+    };
+
     await pool.query(
-      `
-      INSERT INTO packages
-      (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails, created_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb,NOW(),NOW());
-      `,
+      `INSERT INTO packages
+      (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails)
+      VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb);`,
       [
         pkg.name,
         pkg.tagline,
@@ -346,7 +258,7 @@ async function seedDefaultPackages() {
         pkg.price_monthly,
         pkg.term_months,
         pkg.features,
-        JSON.stringify(pkg.pricing_guardrails),
+        JSON.stringify(guardrails),
       ]
     );
   }
@@ -363,17 +275,12 @@ export async function runMigrations() {
     await pool.query("BEGIN");
     await runCustomerMigration();
     await runPackageMigration();
-    await patchPackagesGuardrails(); // ✅ Add pricing_guardrails column
     await runQuoteMigration();
-    await patchQuotesTable();
-    await runQuoteHistoryMigration();
     await runOrderMigration();
-    await runOrderDiaryMigration();
     await runPaymentMigration();
-    await patchMissingTimestamps();
     await seedDefaultPackages();
     await pool.query("COMMIT");
-    console.log("✅ All migrations + patches + seeding completed successfully.");
+    console.log("✅ Migrations + patches completed successfully.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("❌ Migration error:", err.message);
