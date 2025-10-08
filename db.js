@@ -92,9 +92,18 @@ async function runPackageMigration() {
       features TEXT[] DEFAULT '{}',
       discount_percent NUMERIC(5,2) DEFAULT 0,
       visible BOOLEAN DEFAULT TRUE,
+      pricing_guardrails JSONB DEFAULT '{}'::jsonb,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
+  `);
+}
+
+// --- Packages Table Patch (new field) ---
+async function patchPackagesGuardrails() {
+  await pool.query(`
+    ALTER TABLE packages
+    ADD COLUMN IF NOT EXISTS pricing_guardrails JSONB DEFAULT '{}'::jsonb;
   `);
 }
 
@@ -265,6 +274,15 @@ async function seedDefaultPackages() {
         "Social links",
         "Hosting setup",
       ],
+      pricing_guardrails: {
+        require_deposit_months: 1,
+        min_term_months: 24,
+        early_exit_fee_pct: 40,
+        ownership_until_paid: true,
+        late_fee_pct: 5,
+        default_payment_method: "direct_debit",
+        tcs_version: "2025-01",
+      },
     },
     {
       name: "Business",
@@ -279,6 +297,15 @@ async function seedDefaultPackages() {
         "CRM core",
         "On-page SEO",
       ],
+      pricing_guardrails: {
+        require_deposit_months: 1,
+        min_term_months: 24,
+        early_exit_fee_pct: 40,
+        ownership_until_paid: true,
+        late_fee_pct: 5,
+        default_payment_method: "direct_debit",
+        tcs_version: "2025-01",
+      },
     },
     {
       name: "Premium",
@@ -293,6 +320,15 @@ async function seedDefaultPackages() {
         "Priority support",
         "SLA included",
       ],
+      pricing_guardrails: {
+        require_deposit_months: 1,
+        min_term_months: 24,
+        early_exit_fee_pct: 40,
+        ownership_until_paid: true,
+        late_fee_pct: 5,
+        default_payment_method: "direct_debit",
+        tcs_version: "2025-01",
+      },
     },
   ];
 
@@ -300,8 +336,8 @@ async function seedDefaultPackages() {
     await pool.query(
       `
       INSERT INTO packages
-      (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, created_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,NOW(),NOW());
+      (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb,NOW(),NOW());
       `,
       [
         pkg.name,
@@ -310,6 +346,7 @@ async function seedDefaultPackages() {
         pkg.price_monthly,
         pkg.term_months,
         pkg.features,
+        JSON.stringify(pkg.pricing_guardrails),
       ]
     );
   }
@@ -326,13 +363,14 @@ export async function runMigrations() {
     await pool.query("BEGIN");
     await runCustomerMigration();
     await runPackageMigration();
+    await patchPackagesGuardrails(); // ✅ Add pricing_guardrails column
     await runQuoteMigration();
     await patchQuotesTable();
     await runQuoteHistoryMigration();
     await runOrderMigration();
     await runOrderDiaryMigration();
     await runPaymentMigration();
-    await patchMissingTimestamps(); // ✅ Ensures legacy tables are compatible
+    await patchMissingTimestamps();
     await seedDefaultPackages();
     await pool.query("COMMIT");
     console.log("✅ All migrations + patches + seeding completed successfully.");
