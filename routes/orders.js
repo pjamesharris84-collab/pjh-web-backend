@@ -311,7 +311,51 @@ router.get("/:id/payments", async (req, res) => {
 });
 
 /* ============================================================
-   🧾 SEND INVOICE (Deposit/Balance)
+   🧾 VIEW INVOICE (Deposit/Balance) — GET
+============================================================ */
+router.get("/:id/invoice/:type", async (req, res) => {
+  const { id, type } = req.params;
+  const invoiceType = type.toLowerCase();
+
+  if (!["deposit", "balance"].includes(invoiceType))
+    return res.status(400).json({ success: false, error: "Invalid invoice type." });
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT o.*, c.*
+      FROM orders o
+      JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = $1;
+      `,
+      [id]
+    );
+
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: "Order not found." });
+
+    const order = rows[0];
+    const pdfPath = await generateInvoicePDF(order, invoiceType);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename="invoice-${order.id}-${invoiceType}.pdf"`
+    );
+
+    const stream = fs.createReadStream(pdfPath);
+    stream.pipe(res);
+    stream.on("close", () => fs.unlink(pdfPath, () => {}));
+  } catch (err) {
+    console.error(`❌ Error generating ${type} invoice:`, err);
+    res
+      .status(500)
+      .json({ success: false, error: `Failed to generate ${type} invoice.` });
+  }
+});
+
+/* ============================================================
+   🧾 SEND INVOICE (Deposit/Balance) — POST (Email)
 ============================================================ */
 router.post("/:id/invoice/:type", async (req, res) => {
   const { id, type } = req.params;
