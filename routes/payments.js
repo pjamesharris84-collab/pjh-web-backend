@@ -1,15 +1,13 @@
 /**
  * ============================================================
- * PJH Web Services — Unified Stripe Payments & Direct Debit API
+ * PJH Web Services — Stripe Payments & Billing
  * ============================================================
- * Handles:
- *  - Card payments (deposit/balance)
- *  - Direct Debit setup (BACS)
- *  - Stripe webhooks for reconciliation and receipts
- *  - Automatic email notifications
+ * Supports:
+ *  ✅ Card & Bacs one-off payments (via Checkout)
+ *  ✅ Direct Debit setup (no charge)
+ *  ✅ Monthly recurring charges (off-session)
  * ============================================================
  */
-
 import express from "express";
 import Stripe from "stripe";
 import dotenv from "dotenv";
@@ -20,99 +18,125 @@ import {
   paymentSuccessTemplate,
   paymentFailureTemplate,
 } from "../utils/emailTemplates.js";
-import { LOGO_BASE64 } from "../utils/emailLogo.js";
 
 dotenv.config();
-
 const router = express.Router();
-
-// ✅ Let Stripe auto-select your account’s API version (no manual pin)
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
-// 🧭 Log API version for clarity
-(async () => {
-  try {
-    const info = await stripe.accounts.retrieve();
-    console.log(
-      `🔗 Stripe connected (API version: ${stripe.getApiField("version") || "default"})`
-    );
-  } catch {
-    console.log("🔗 Stripe initialized (version auto-detected)");
-  }
-})();
-
 const FRONTEND_URL =
-  process.env.FRONTEND_URL ||
-  (process.env.NODE_ENV === "development"
-    ? "http://localhost:5173"
-    : "https://www.pjhwebservices.co.uk");
+  process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk";
 
 /* ============================================================
-   💳 1️⃣ Create Stripe Card Payment Session
+   🧾 Ensure Stripe Customer
 ============================================================ */
-router.post("/create-session", async (req, res) => {
-  const { orderId, type } = req.body;
+async function ensureStripeCustomer(customer) {
+  if (customer.stripe_customer_id) return customer.stripe_customer_id;
+  const sc = await stripe.customers.create({
+    name: customer.name,
+    email: customer.email,
+    address: {
+      line1: customer.address1 || "Unknown address",
+      city: customer.city || "London",
+      country: "GB",
+      postal_code: customer.postcode || "EC1A 1AA",
+    },
+    metadata: { pjh_customer_id: customer.id },
+  });
+  await pool.query(
+    "UPDATE customers SET stripe_customer_id=$1 WHERE id=$2",
+    [sc.id, customer.id]
+  );
+  return sc.id;
+}
 
-  if (!orderId || !["deposit", "balance"].includes(type)) {
-    return res.status(400).json({
-      success: false,
-      error: "Invalid orderId or payment type.",
-    });
-  }
-
+/* ============================================================
+   💳 Create Checkout (Card / Bacs / Setup)
+============================================================ */
+router.post("/create-checkout", async (req, res) => {
   try {
+    const { orderId, flow, type } = req.body;
+
+    if (!orderId) return res.status(400).json({ error: "Missing orderId" });
+    if (!["card_payment", "bacs_payment", "bacs_setup"].includes(flow))
+      return res.status(400).json({ error: "Invalid flow" });
+
     const { rows } = await pool.query(
-      `
-      SELECT o.*, c.name, c.email, c.business
-      FROM orders o
-      JOIN customers c ON o.customer_id = c.id
-      WHERE o.id = $1;
-      `,
+      `SELECT o.*, c.id as cid, c.name, c.email, c.stripe_customer_id
+       FROM orders o JOIN customers c ON c.id = o.customer_id WHERE o.id = $1`,
       [orderId]
     );
-
-    if (!rows.length)
-      return res.status(404).json({ success: false, error: "Order not found." });
-
+    if (!rows.length) return res.status(404).json({ error: "Order not found" });
     const order = rows[0];
-    const amount = type === "deposit" ? Number(order.deposit) : Number(order.balance);
 
-    if (isNaN(amount) || amount <= 0)
-      return res.status(400).json({ success: false, error: "Invalid amount." });
+    let amount = 0;
+    if (["card_payment", "bacs_payment"].includes(flow)) {
+      amount = type === "deposit" ? Number(order.deposit) : Number(order.balance);
+      if (!amount || amount <= 0)
+        return res.status(400).json({ error: "Invalid amount" });
+    }
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
-      mode: "payment",
-      line_items: [
-        {
-          price_data: {
-            currency: "gbp",
-            product_data: {
-              name: `${type === "deposit" ? "Deposit" : "Balance"} — ${order.title}`,
+    const stripeCustomerId = await ensureStripeCustomer(order);
+    const metadata = { order_id: order.id, customer_id: order.cid, payment_type: type || "general" };
+
+    let session;
+    if (flow === "card_payment") {
+      session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        customer: stripeCustomerId,
+        payment_method_types: ["card"],
+        line_items: [
+          {
+            price_data: {
+              currency: "gbp",
+              product_data: { name: `${type} — ${order.title}` },
+              unit_amount: Math.round(amount * 100),
             },
-            unit_amount: Math.round(amount * 100),
+            quantity: 1,
           },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        order_id: order.id,
-        customer_id: order.customer_id,
-        payment_type: type,
-      },
-      success_url: `${FRONTEND_URL}/payment-success?order=${order.id}`,
-      cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${order.id}`,
-      customer_email: order.email,
-    });
+        ],
+        success_url: `${FRONTEND_URL}/payment-success?order=${order.id}`,
+        cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${order.id}`,
+        metadata,
+      });
+    } else if (flow === "bacs_payment") {
+      session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        customer: stripeCustomerId,
+        payment_method_types: ["bacs_debit"],
+        line_items: [
+          {
+            price_data: {
+              currency: "gbp",
+              product_data: { name: `${type} — ${order.title} (Direct Debit)` },
+              unit_amount: Math.round(amount * 100),
+            },
+            quantity: 1,
+          },
+        ],
+        success_url: `${FRONTEND_URL}/payment-success?order=${order.id}`,
+        cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${order.id}`,
+        metadata,
+      });
+    } else {
+      session = await stripe.checkout.sessions.create({
+        mode: "setup",
+        customer: stripeCustomerId,
+        payment_method_types: ["bacs_debit"],
+        success_url: `${FRONTEND_URL}/payment-success?setup=1&order=${order.id}`,
+        cancel_url: `${FRONTEND_URL}/payment-cancelled?setup=1&order=${order.id}`,
+        metadata,
+      });
+    }
 
-    // 💌 Email payment link to customer
     await sendEmail({
       to: order.email,
-      subject: `Secure ${type} payment link — ${order.title}`,
+      subject:
+        flow === "bacs_setup"
+          ? `Setup your Direct Debit — ${order.title}`
+          : `Secure ${type} payment — ${order.title}`,
       html: paymentRequestTemplate({
         customerName: order.name,
         orderTitle: order.title,
-        amount,
+        amount: flow === "bacs_setup" ? 0 : amount,
         link: session.url,
         type,
       }),
@@ -120,251 +144,108 @@ router.post("/create-session", async (req, res) => {
 
     res.json({ success: true, url: session.url });
   } catch (err) {
-    console.error("❌ Error creating Stripe session:", err);
-    res.status(500).json({ success: false, error: "Failed to create payment session." });
+    console.error("❌ create-checkout error:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
 /* ============================================================
-   🧾 2️⃣ Setup Direct Debit Mandate (Stripe BACS – Hosted Flow)
+   🔁 Webhook
 ============================================================ */
-router.post("/setup-direct-debit/:customerId", async (req, res) => {
+router.post("/webhook", async (req, res) => {
+  let event;
   try {
-    const { customerId } = req.params;
-    const { rows } = await pool.query("SELECT * FROM customers WHERE id=$1", [customerId]);
-
-    if (!rows.length)
-      return res.status(404).json({ success: false, error: "Customer not found." });
-
-    const customer = rows[0];
-
-    // 🧍‍♂️ Ensure Stripe customer exists (with fallback UK address)
-    let stripeCustomerId = customer.stripe_customer_id;
-    if (!stripeCustomerId) {
-      const stripeCustomer = await stripe.customers.create({
-        name: customer.name,
-        email: customer.email,
-        address: {
-          line1: customer.address1 || "123 Test Street",
-          city: customer.city || "London",
-          country: "GB",
-          postal_code: customer.postcode || "EC1A 1AA",
-        },
-        metadata: { pjh_customer_id: customer.id },
-      });
-      stripeCustomerId = stripeCustomer.id;
-
-      await pool.query("UPDATE customers SET stripe_customer_id=$1 WHERE id=$2", [
-        stripeCustomerId,
-        customerId,
-      ]);
-    }
-
-    // 💳 Create SetupIntent (no mandate_data yet — handled client-side)
-    const setupIntent = await stripe.setupIntents.create({
-      payment_method_types: ["bacs_debit"],
-      customer: stripeCustomerId,
-      usage: "off_session",
-      metadata: { pjh_customer_id: customer.id },
-    });
-
-    // 📩 Generate hosted setup link (frontend confirmation flow)
-    const setupUrl = `${FRONTEND_URL}/direct-debit-setup?client_secret=${setupIntent.client_secret}`;
-
-    // 💌 Notify customer
-    await sendEmail({
-      to: customer.email,
-      subject: "Set up your Direct Debit mandate — PJH Web Services",
-      html: `
-        <div style="font-family:Arial,sans-serif;color:#333;padding:20px;">
-          <h2>Direct Debit Mandate Setup</h2>
-          <p>Hi ${customer.name},</p>
-          <p>You can securely complete your Direct Debit setup using the link below:</p>
-          <p style="margin:20px 0;">
-            <a href="${setupUrl}" style="background:#007bff;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;">Complete Setup</a>
-          </p>
-          <p>If you have any questions, contact <a href="mailto:info@pjhwebservices.co.uk">info@pjhwebservices.co.uk</a>.</p>
-        </div>
-      `,
-    });
-
-    res.json({
-      success: true,
-      client_secret: setupIntent.client_secret,
-      hosted_link: setupUrl,
-      message: "Direct Debit setup initiated successfully.",
-    });
+    event = stripe.webhooks.constructEvent(
+      req.body,
+      req.headers["stripe-signature"],
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
   } catch (err) {
-    console.error("❌ Direct Debit setup failed:", err.message);
-    if (err.raw) console.error("🔍 Stripe error details:", JSON.stringify(err.raw, null, 2));
-    res.status(500).json({
-      success: false,
-      error: err.raw?.message || err.message || "Failed to initiate Direct Debit setup.",
-    });
+    console.error("⚠️ Webhook signature failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-});
 
-/* ============================================================
-   🔄 3️⃣ Stripe Webhook (Payments + Mandates + Receipts)
-============================================================ */
-router.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    let event;
+  const data = event.data.object;
 
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      console.error("⚠️ Webhook signature verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    const data = event.data.object;
-
-    try {
-      switch (event.type) {
-        /* ----------------------------------------------
-           🧾 Mandate setup success/failure
-        ---------------------------------------------- */
-        case "mandate.updated":
-        case "mandate.created":
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const session = data;
+        if (session.mode === "setup") {
+          const si = await stripe.setupIntents.retrieve(session.setup_intent);
+          const pm = await stripe.paymentMethods.retrieve(si.payment_method);
+          const mandate = pm.bacs_debit?.mandate || si.mandate;
           await pool.query(
-            `
-            UPDATE customers
-            SET stripe_mandate_id=$1, direct_debit_active=$2
-            WHERE stripe_customer_id=$3;
-          `,
-            [data.id, data.status === "active", data.customer]
+            "UPDATE customers SET stripe_mandate_id=$1, direct_debit_active=true WHERE stripe_customer_id=$2",
+            [mandate, session.customer]
           );
-          console.log(`✅ Mandate updated: ${data.id} (${data.status})`);
-          break;
-
-        /* ----------------------------------------------
-           💰 Payment Success (Card or Direct Debit)
-        ---------------------------------------------- */
-        case "payment_intent.succeeded": {
-          const orderId = data.metadata?.order_id || null;
-          const customerId = data.metadata?.customer_id || null;
-          const amount = data.amount_received / 100;
-
-          await pool.query(
-            `INSERT INTO payments (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid')
-             ON CONFLICT (stripe_event_id) DO NOTHING;`,
-            [
-              event.id,
-              orderId,
-              customerId,
-              amount,
-              data.metadata?.payment_type || "card",
-              data.payment_method_types?.[0] || "card",
-              data.id,
-              data.status,
-            ]
-          );
-
-          if (orderId) {
-            const { rows: orderRows } = await pool.query("SELECT * FROM orders WHERE id=$1", [
-              orderId,
-            ]);
-            if (orderRows.length) {
-              const order = orderRows[0];
-              const newTotal = Number(order.total_paid || 0) + amount;
-              await pool.query("UPDATE orders SET total_paid=$1 WHERE id=$2", [
-                newTotal,
-                orderId,
-              ]);
-            }
-          }
-
-          if (customerId) {
-            const custRes = await pool.query("SELECT * FROM customers WHERE id=$1", [customerId]);
-            if (custRes.rows.length) {
-              await sendEmail({
-                to: custRes.rows[0].email,
-                subject: "Payment received — thank you!",
-                html: paymentSuccessTemplate({
-                  customerName: custRes.rows[0].name,
-                  amount,
-                }),
-              });
-            }
-          }
-
-          console.log(`💰 Payment recorded successfully (Order ${orderId})`);
-          break;
+          console.log("✅ Bacs mandate stored.");
         }
-
-        /* ----------------------------------------------
-           💸 Payment Failure
-        ---------------------------------------------- */
-        case "payment_intent.payment_failed": {
-          const orderId = data.metadata?.order_id || null;
-          const customerId = data.metadata?.customer_id || null;
-          const amount = data.amount / 100;
-
-          await pool.query(
-            `INSERT INTO payments (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'failed')
-             ON CONFLICT (stripe_event_id) DO NOTHING;`,
-            [
-              event.id,
-              orderId,
-              customerId,
-              amount,
-              data.metadata?.payment_type || "card",
-              data.payment_method_types?.[0] || "card",
-              data.id,
-              data.status,
-            ]
-          );
-
-          if (customerId) {
-            const cust = await pool.query("SELECT * FROM customers WHERE id=$1", [customerId]);
-            if (cust.rows.length) {
-              await sendEmail({
-                to: cust.rows[0].email,
-                subject: "Payment failed — action required",
-                html: paymentFailureTemplate({
-                  customerName: cust.rows[0].name,
-                  amount,
-                }),
-              });
-            }
-          }
-
-          console.warn(`⚠️ Payment failed: ${data.id}`);
-          break;
-        }
-
-        /* ----------------------------------------------
-           💷 Refunds & Cancellations
-        ---------------------------------------------- */
-        case "charge.refunded":
-        case "payment_intent.canceled":
-          await pool.query(
-            `UPDATE payments SET status='refunded', stripe_status=$2 WHERE stripe_event_id=$1;`,
-            [event.id, data.status]
-          );
-          console.log(`↩️ Payment refunded/cancelled: ${data.id}`);
-          break;
-
-        default:
-          console.log(`ℹ️ Unhandled Stripe event type: ${event.type}`);
+        break;
       }
 
-      res.json({ received: true });
-    } catch (err) {
-      console.error("❌ Webhook processing error:", err);
-      res.status(500).json({ success: false });
+      case "payment_intent.succeeded":
+        console.log("💰 Payment succeeded:", data.id);
+        break;
+
+      case "payment_intent.payment_failed":
+        console.log("⚠️ Payment failed:", data.id);
+        break;
     }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error("❌ Webhook error:", err.message);
+    res.status(500).json({ error: err.message });
   }
-);
+});
+
+/* ============================================================
+   🔁 Monthly Recurring Billing (Direct Debit)
+============================================================ */
+router.post("/bill-recurring", async (req, res) => {
+  try {
+    const { amount, description } = req.body;
+    const { rows } = await pool.query(
+      "SELECT * FROM customers WHERE direct_debit_active=true AND stripe_mandate_id IS NOT NULL"
+    );
+
+    for (const c of rows) {
+      try {
+        const pi = await stripe.paymentIntents.create({
+          amount: Math.round(amount * 100),
+          currency: "gbp",
+          customer: c.stripe_customer_id,
+          payment_method_types: ["bacs_debit"],
+          payment_method_options: {
+            bacs_debit: { mandate: c.stripe_mandate_id },
+          },
+          confirm: true,
+          off_session: true,
+          description: description || "PJH Monthly Maintenance",
+        });
+
+        console.log(`✅ Charged ${c.name}: £${amount}`);
+        await sendEmail({
+          to: c.email,
+          subject: `Direct Debit payment successful — £${amount}`,
+          html: paymentSuccessTemplate({ customerName: c.name, amount }),
+        });
+      } catch (e) {
+        console.error(`❌ Failed for ${c.name}: ${e.message}`);
+        await sendEmail({
+          to: c.email,
+          subject: "Payment failed — please update your details",
+          html: paymentFailureTemplate({ customerName: c.name, amount }),
+        });
+      }
+    }
+
+    res.json({ success: true, message: "Billing run complete." });
+  } catch (err) {
+    console.error("❌ Billing error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 export default router;

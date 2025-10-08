@@ -1,6 +1,6 @@
-// ============================================
+// ============================================================
 // PJH Web Services — Server Startup File
-// ============================================
+// ============================================================
 
 import express from "express";
 import cors from "cors";
@@ -8,7 +8,7 @@ import dotenv from "dotenv";
 import { runMigrations } from "./db.js";
 import { sendEmail } from "./utils/email.js";
 
-// Existing routers
+// Routers
 import adminQuotesRoutes from "./routes/adminQuotes.js";
 import authRoutes from "./routes/auth.js";
 import customerRoutes from "./routes/customers.js";
@@ -17,89 +17,78 @@ import quoteResponseRoutes from "./routes/quoteResponses.js";
 import responsesRoutes from "./routes/responses.js";
 import orderDiaryRoutes from "./routes/orderDiary.js";
 import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
+import packagesRouter from "./routes/packages.js";
 
-// ✅ New integrations
+// ✅ Unified Stripe Checkout + Direct Debit Billing
 import paymentsRouter from "./routes/payments.js";
-import stripeWebhook from "./routes/stripeWebhook.js";
-import packagesRouter from "./routes/packages.js"; // ✅ Packages management
-
 
 dotenv.config();
 const app = express();
 
-// -----------------------------------------
-// 🌍 Dynamic CORS Configuration
-// -----------------------------------------
+/* ============================================================
+   🌍 CORS
+============================================================ */
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
-  .map((origin) => origin.trim())
+  .map((o) => o.trim())
   .filter(Boolean);
-
-if (!allowedOrigins.includes("http://localhost:5173")) {
-  allowedOrigins.push("http://localhost:5173"); // Always allow local dev
-}
+if (!allowedOrigins.includes("http://localhost:5173")) allowedOrigins.push("http://localhost:5173");
 
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-      console.warn(`🚫 Blocked CORS request from: ${origin}`);
-      return callback(new Error("Not allowed by CORS"), false);
+    origin: (origin, cb) => {
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      console.warn(`🚫 Blocked CORS: ${origin}`);
+      return cb(new Error("CORS blocked"), false);
     },
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
 
 app.options("*", (req, res) => {
-  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
-  res.header(
-    "Access-Control-Allow-Headers",
-    "Origin, X-Requested-With, Content-Type, Accept, Authorization"
-  );
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Credentials", "true");
-  res.sendStatus(200);
+    res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+    res.header(
+      "Access-Control-Allow-Headers",
+      "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+    );
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Credentials", "true");
+    res.sendStatus(200);
 });
 
-// -----------------------------------------
-// 🧩 Environment Info
-// -----------------------------------------
-console.log("🧩 Loaded environment:", {
+/* ============================================================
+   🧠 Environment Info
+============================================================ */
+console.log("🧩 Environment loaded:");
+console.table({
   NODE_ENV: process.env.NODE_ENV,
   PORT: process.env.PORT,
-  ALLOWED_ORIGINS: allowedOrigins,
-  STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET ? "(set)" : "(missing)",
-  STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? "(set)" : "(missing)",
+  STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? "✅" : "❌",
+  STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET ? "✅" : "❌",
 });
 
-// -----------------------------------------
-// ⚙️ Middleware
-// -----------------------------------------
+/* ============================================================
+   ⚙️ Middleware
+============================================================ */
 
-// ⚠️ Stripe webhook requires raw body
-app.post(
-  "/api/stripe/webhook",
-  express.raw({ type: "application/json" }),
-  stripeWebhook
-);
+// Stripe webhook (must use raw body)
+app.use("/api/payments/webhook", express.raw({ type: "application/json" }), paymentsRouter);
 
-// All other routes parse JSON normally
+// All other routes use JSON
 app.use(express.json());
 
-// -----------------------------------------
-// 🧱 Run database migrations
-// -----------------------------------------
+/* ============================================================
+   🧱 Migrations
+============================================================ */
 await runMigrations();
 
-// -----------------------------------------
-// ✉️ Contact Form
-// -----------------------------------------
+/* ============================================================
+   ✉️ Contact Form
+============================================================ */
 app.post("/api/contact", async (req, res) => {
   const { name, email, phone, message } = req.body;
-  if (!name || !email || !phone || !message) {
+  if (!name || !email || !phone || !message)
     return res.status(400).json({ success: false, error: "All fields required." });
-  }
 
   try {
     await sendEmail({
@@ -108,23 +97,18 @@ app.post("/api/contact", async (req, res) => {
       subject: `📬 Contact Form: ${name}`,
       text: `${message}\n\nEmail: ${email}\nPhone: ${phone}`,
     });
-
-    console.log(`📧 Contact form received from ${name} (${email})`);
-    res.json({ success: true, message: "Email sent successfully." });
-  } catch (error) {
-    console.error("❌ Contact form failed:", error.message);
-    res.status(500).json({ success: false, error: "Failed to send email." });
+    console.log(`📧 Contact received from ${name} (${email})`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ Contact form failed:", err.message);
+    res.status(500).json({ success: false, error: "Email failed." });
   }
 });
 
-// -----------------------------------------
-// 📦 API Routes
-// -----------------------------------------
-
-// ✅ Stripe / Payments
+/* ============================================================
+   📦 API Routes
+============================================================ */
 app.use("/api/payments", paymentsRouter);
-
-// ✅ Core business logic
 app.use("/api/admin/quotes", adminQuotesRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
@@ -132,33 +116,21 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
 app.use("/api/orders", orderDiaryRoutes);
-
-// ✅ New packages API (fixes dropdown)
 app.use("/api/packages", packagesRouter);
-
-// ✅ Dual-mount quotes
 app.use("/api/customers", quotesCustomerRouter);
 app.use("/api/quotes", quotesAdminRouter);
 
-// ✅ Serve static assets
 app.use(express.static("public"));
 
-// -----------------------------------------
-// 🌐 Health Check Endpoint
-// -----------------------------------------
-app.get("/", (req, res) => {
-  res.send("✅ PJH Web Services API running with full integrations (Stripe, Packages, CRM)");
-});
+/* ============================================================
+   🌐 Health Check
+============================================================ */
+app.get("/", (req, res) =>
+  res.send("✅ PJH Web Services API — Stripe Checkout + Recurring Billing Active.")
+);
 
-// 🧩 Debug route to verify packages router
-app.get("/api/packages/test", (req, res) => {
-  res.json({ success: true, message: "✅ Packages router is active" });
-});
-
-// -----------------------------------------
-// 🚀 Server Start
-// -----------------------------------------
+/* ============================================================
+   🚀 Start Server
+============================================================ */
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Backend live at: http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));

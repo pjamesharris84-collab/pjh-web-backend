@@ -1,0 +1,11 @@
+{
+  "type": "bacs_debit",
+  "bacs_debit": {
+    "sort_code": "108800",
+    "account_number": "00012345"
+  },
+  "billing_details": {
+    "name": "Test User",
+    "email": "test@example.com"
+  }
+}
