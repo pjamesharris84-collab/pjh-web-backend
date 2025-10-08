@@ -25,7 +25,11 @@ import { LOGO_BASE64 } from "../utils/emailLogo.js";
 dotenv.config();
 
 const router = express.Router();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// ✅ Pin Stripe to a stable API version (avoid preview “clover”)
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2024-08-20",
+});
 
 const FRONTEND_URL =
   process.env.FRONTEND_URL ||
@@ -112,7 +116,7 @@ router.post("/create-session", async (req, res) => {
 });
 
 /* ============================================================
-   🧾 2️⃣ Setup Direct Debit Mandate (Stripe BACS)
+   🧾 2️⃣ Setup Direct Debit Mandate (Stripe BACS, Test-Mode Safe)
 ============================================================ */
 router.post("/setup-direct-debit/:customerId", async (req, res) => {
   try {
@@ -124,36 +128,56 @@ router.post("/setup-direct-debit/:customerId", async (req, res) => {
 
     const customer = rows[0];
 
-    // 🧍‍♂️ Create or reuse Stripe customer
+    // 🧍‍♂️ Ensure Stripe customer exists (with fallback UK address)
     let stripeCustomerId = customer.stripe_customer_id;
     if (!stripeCustomerId) {
       const stripeCustomer = await stripe.customers.create({
         name: customer.name,
         email: customer.email,
+        address: {
+          line1: customer.address1 || "123 Test Street",
+          city: customer.city || "London",
+          country: "GB",
+          postal_code: customer.postcode || "EC1A 1AA",
+        },
         metadata: { pjh_customer_id: customer.id },
       });
       stripeCustomerId = stripeCustomer.id;
+
       await pool.query("UPDATE customers SET stripe_customer_id=$1 WHERE id=$2", [
         stripeCustomerId,
         customerId,
       ]);
     }
 
-    // 💳 Create SetupIntent for BACS
+    // 💳 Create SetupIntent for BACS with mandate acceptance metadata
     const setupIntent = await stripe.setupIntents.create({
       payment_method_types: ["bacs_debit"],
       customer: stripeCustomerId,
       usage: "off_session",
+      mandate_data: {
+        customer_acceptance: {
+          type: "online",
+          online: {
+            ip_address: req.ip || "127.0.0.1",
+            user_agent: req.headers["user-agent"] || "PJH-WebServices-Agent",
+          },
+        },
+      },
     });
 
     res.json({
       success: true,
       client_secret: setupIntent.client_secret,
-      message: "Direct Debit setup initiated.",
+      message: "Direct Debit setup initiated successfully.",
     });
   } catch (err) {
-    console.error("❌ Direct Debit setup failed:", err);
-    res.status(500).json({ success: false, error: "Failed to initiate Direct Debit setup." });
+    console.error("❌ Direct Debit setup failed:", err.message);
+    if (err.raw) console.error("🔍 Stripe error details:", JSON.stringify(err.raw, null, 2));
+    res.status(500).json({
+      success: false,
+      error: err.raw?.message || err.message || "Failed to initiate Direct Debit setup.",
+    });
   }
 });
 
@@ -236,7 +260,7 @@ router.post(
             }
           }
 
-          // send payment success email
+          // 💌 Send payment success email
           if (customerId) {
             const custRes = await pool.query("SELECT * FROM customers WHERE id=$1", [customerId]);
             if (custRes.rows.length) {
