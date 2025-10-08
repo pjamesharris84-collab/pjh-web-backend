@@ -1,3 +1,15 @@
+/**
+ * ============================================================
+ * PJH Web Services — Unified Stripe Payments & Direct Debit API
+ * ============================================================
+ * Handles:
+ *  - Card payments (deposit/balance)
+ *  - Direct Debit setup (BACS)
+ *  - Stripe webhooks for reconciliation and receipts
+ *  - Automatic email notifications
+ * ============================================================
+ */
+
 import express from "express";
 import Stripe from "stripe";
 import dotenv from "dotenv";
@@ -14,19 +26,20 @@ dotenv.config();
 
 const router = express.Router();
 
-// ✅ Let Stripe auto-select your account’s API version (don’t pin)
+// ✅ Let Stripe auto-select your account’s API version (no manual pin)
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Log version for clarity
+// 🧭 Log API version for clarity
 (async () => {
   try {
     const info = await stripe.accounts.retrieve();
-    console.log(`🔗 Stripe connected (API version: ${stripe.getApiField("version") || "default"})`);
+    console.log(
+      `🔗 Stripe connected (API version: ${stripe.getApiField("version") || "default"})`
+    );
   } catch {
     console.log("🔗 Stripe initialized (version auto-detected)");
   }
 })();
-
 
 const FRONTEND_URL =
   process.env.FRONTEND_URL ||
@@ -113,7 +126,7 @@ router.post("/create-session", async (req, res) => {
 });
 
 /* ============================================================
-   🧾 2️⃣ Setup Direct Debit Mandate (Stripe BACS, Test-Mode Safe)
+   🧾 2️⃣ Setup Direct Debit Mandate (Stripe BACS – Hosted Flow)
 ============================================================ */
 router.post("/setup-direct-debit/:customerId", async (req, res) => {
   try {
@@ -147,25 +160,38 @@ router.post("/setup-direct-debit/:customerId", async (req, res) => {
       ]);
     }
 
-    // 💳 Create SetupIntent for BACS with mandate acceptance metadata
+    // 💳 Create SetupIntent (no mandate_data yet — handled client-side)
     const setupIntent = await stripe.setupIntents.create({
       payment_method_types: ["bacs_debit"],
       customer: stripeCustomerId,
       usage: "off_session",
-      mandate_data: {
-        customer_acceptance: {
-          type: "online",
-          online: {
-            ip_address: req.ip || "127.0.0.1",
-            user_agent: req.headers["user-agent"] || "PJH-WebServices-Agent",
-          },
-        },
-      },
+      metadata: { pjh_customer_id: customer.id },
+    });
+
+    // 📩 Generate hosted setup link (frontend confirmation flow)
+    const setupUrl = `${FRONTEND_URL}/direct-debit-setup?client_secret=${setupIntent.client_secret}`;
+
+    // 💌 Notify customer
+    await sendEmail({
+      to: customer.email,
+      subject: "Set up your Direct Debit mandate — PJH Web Services",
+      html: `
+        <div style="font-family:Arial,sans-serif;color:#333;padding:20px;">
+          <h2>Direct Debit Mandate Setup</h2>
+          <p>Hi ${customer.name},</p>
+          <p>You can securely complete your Direct Debit setup using the link below:</p>
+          <p style="margin:20px 0;">
+            <a href="${setupUrl}" style="background:#007bff;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;">Complete Setup</a>
+          </p>
+          <p>If you have any questions, contact <a href="mailto:info@pjhwebservices.co.uk">info@pjhwebservices.co.uk</a>.</p>
+        </div>
+      `,
     });
 
     res.json({
       success: true,
       client_secret: setupIntent.client_secret,
+      hosted_link: setupUrl,
       message: "Direct Debit setup initiated successfully.",
     });
   } catch (err) {
@@ -257,7 +283,6 @@ router.post(
             }
           }
 
-          // 💌 Send payment success email
           if (customerId) {
             const custRes = await pool.query("SELECT * FROM customers WHERE id=$1", [customerId]);
             if (custRes.rows.length) {
