@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * PJH Web Services — Quotes API
+ * PJH Web Services — Quotes API (2025 Update)
  * ============================================================
  * Customer routes  → mounted at /api/customers
  * Admin routes     → mounted at /api/quotes
@@ -10,22 +10,22 @@
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
 import pool, { generateQuoteNumber } from "../db.js";
 import { generateResponseToken } from "../utils/token.js";
 import { sendEmail } from "../utils/email.js";
-import { generateQuotePDF } from "../utils/pdf.js";
-import { toArray, calcSubtotal, findQuote } from "../utils/quotes.js"; // ✅ moved helpers
+import { generateQuotePDF } from "../utils/pdf.js"; // ✅ updated import
+import { toArray, calcSubtotal, findQuote } from "../utils/quotes.js";
 
-// ------------------ Setup ------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export const quotesCustomerRouter = express.Router();
 export const quotesAdminRouter = express.Router();
 
-// -----------------------------------------------------------
-//                   CUSTOMER ROUTES
-// -----------------------------------------------------------
+/* ============================================================
+   CUSTOMER ROUTES
+   ============================================================ */
 
 // ➕ Create Quote
 quotesCustomerRouter.post("/:id/quotes", async (req, res) => {
@@ -167,9 +167,9 @@ quotesCustomerRouter.delete("/:id/quotes/:quoteId", async (req, res) => {
   }
 });
 
-// -----------------------------------------------------------
-//                     ADMIN ROUTES
-// -----------------------------------------------------------
+/* ============================================================
+   ADMIN ROUTES
+   ============================================================ */
 
 // 🔍 Get One (Admin)
 quotesAdminRouter.get("/:quoteId", async (req, res) => {
@@ -287,6 +287,42 @@ quotesAdminRouter.post("/:quoteId/email", async (req, res) => {
   } catch (err) {
     console.error("❌ Error emailing quote:", err);
     res.status(500).json({ success: false, error: "Failed to email quote." });
+  }
+});
+
+// 👁️ Preview Quote (Admin) — NEW
+quotesAdminRouter.post("/:quoteId/preview", async (req, res) => {
+  const { quoteId } = req.params;
+
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT q.*, c.business AS customer_business, c.name AS customer_name,
+             c.email AS customer_email, c.phone AS customer_phone,
+             c.address1, c.address2, c.city, c.county, c.postcode
+      FROM quotes q
+      LEFT JOIN customers c ON q.customer_id = c.id
+      WHERE q.id = $1;
+      `,
+      [quoteId]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, error: "Quote not found." });
+    }
+
+    const quote = { ...rows[0], ...req.body };
+    const pdfPath = await generateQuotePDF(quote);
+    const pdfBuffer = fs.readFileSync(pdfPath);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="Quote-${quoteId}-preview.pdf"`);
+    res.send(pdfBuffer);
+
+    setTimeout(() => fs.unlink(pdfPath, () => {}), 30000);
+  } catch (err) {
+    console.error("❌ Preview quote failed:", err);
+    res.status(500).json({ success: false, error: "Failed to generate quote preview." });
   }
 });
 
