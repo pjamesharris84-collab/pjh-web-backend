@@ -1,18 +1,21 @@
 /**
  * ============================================================
- * PJH Web Services — Orders & Invoicing API (2025 Unified Final)
+ * PJH Web Services — Orders & Invoicing API (2025 Final Stable)
  * ============================================================
  * Handles:
  *  ✅ Order lifecycle & quote conversion
  *  ✅ Stripe & manual payments
  *  ✅ Direct Debit integration
  *  ✅ Invoice PDF generation + email delivery
+ *  ✅ Invoice PDF preview (GET)
+ *  ✅ Dynamic invoice filenames (PJH-INV-<order>-<type>.pdf)
  *  ✅ Payment reconciliation & order refresh
  * ============================================================
  */
 
 import express from "express";
 import fs from "fs";
+import path from "path";
 import pool from "../db.js";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -125,7 +128,6 @@ router.get("/:id", async (req, res) => {
 router.post("/from-quote/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
   try {
-    // Prevent duplicates
     const existing = await pool.query(
       "SELECT * FROM orders WHERE quote_id=$1 LIMIT 1",
       [quoteId]
@@ -360,19 +362,21 @@ router.post("/:id/invoice/:type", async (req, res) => {
       return res.status(404).json({ success: false, error: "Order not found." });
 
     const order = rows[0];
-
-    // Get accurate totals
     const { rows: payments } = await pool.query(
       `SELECT * FROM payments WHERE order_id=$1 AND status='paid'`,
       [id]
     );
+
     const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
     const subtotal = Number(order.deposit || 0) + Number(order.balance || 0);
     const balanceDue = Math.max(subtotal - totalPaid, 0);
 
+    // ✅ Dynamic filename
+    const filename = `PJH-INV-${order.id}-${invoiceType}.pdf`;
     const pdfPath = await generateInvoicePDF(
       { ...order, total_paid: totalPaid, balance_due: balanceDue },
-      invoiceType
+      invoiceType,
+      filename
     );
 
     await sendEmail({
@@ -388,7 +392,7 @@ router.post("/:id/invoice/:type", async (req, res) => {
             : Number(order.balance),
         link: `${FRONTEND_URL}/pay?order=${order.id}&type=${invoiceType}`,
       }),
-      attachments: [{ filename: `invoice-${order.id}.pdf`, path: pdfPath }],
+      attachments: [{ filename, path: pdfPath }],
     });
 
     const flag =
@@ -397,7 +401,7 @@ router.post("/:id/invoice/:type", async (req, res) => {
 
     res.json({
       success: true,
-      message: `${invoiceType} invoice sent successfully.`,
+      message: `${invoiceType} invoice emailed successfully.`,
     });
   } catch (err) {
     console.error(`❌ Error sending ${type} invoice:`, err);
@@ -405,6 +409,54 @@ router.post("/:id/invoice/:type", async (req, res) => {
       success: false,
       error: `Failed to send ${type} invoice.`,
     });
+  }
+});
+
+/* ============================================================
+   👀 GET /api/orders/:id/invoice/:type
+   Preview invoice PDF (no email)
+============================================================ */
+router.get("/:id/invoice/:type", async (req, res) => {
+  const { id, type } = req.params;
+  const invoiceType = type.toLowerCase();
+
+  if (!["deposit", "balance"].includes(invoiceType)) {
+    return res.status(400).json({ success: false, error: "Invalid invoice type." });
+  }
+
+  try {
+    const { rows } = await pool.query(`
+      SELECT o.*, c.*
+      FROM orders o
+      JOIN customers c ON o.customer_id = c.id
+      WHERE o.id = $1
+    `, [id]);
+
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: "Order not found." });
+
+    const order = rows[0];
+    const { rows: payments } = await pool.query(
+      `SELECT * FROM payments WHERE order_id=$1 AND status='paid'`,
+      [id]
+    );
+
+    const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
+    const subtotal = Number(order.deposit || 0) + Number(order.balance || 0);
+    const balanceDue = Math.max(subtotal - totalPaid, 0);
+
+    const filename = `PJH-INV-${order.id}-${invoiceType}.pdf`;
+    const pdfPath = await generateInvoicePDF(
+      { ...order, total_paid: totalPaid, balance_due: balanceDue },
+      invoiceType,
+      filename
+    );
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.sendFile(pdfPath, { root: process.cwd() });
+  } catch (err) {
+    console.error(`❌ Error generating preview (${invoiceType}):`, err);
+    res.status(500).json({ success: false, error: "Failed to generate preview." });
   }
 });
 
