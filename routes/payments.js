@@ -1,20 +1,20 @@
 /**
  * ============================================================
- * PJH Web Services — Stripe Payments & Billing (Unified)
+ * PJH Web Services — Stripe Payments & Billing (Unified + Fixed)
  * ============================================================
  * Supports:
  *  ✅ Card & Bacs one-off payments via Checkout
  *  ✅ Direct Debit mandate setup via Checkout (mode: "setup")
- *  ✅ Dynamic amounts (deposit/balance minus amounts already paid)
- *  ✅ Webhook-led reconciliation (payments table + orders.total_paid)
- *  ✅ Off-session monthly billing using stored Bacs mandates
+ *  ✅ Dynamic amounts (deposit/balance minus already-paid)
+ *  ✅ Webhook-led reconciliation (payments + orders.total_paid)
+ *  ✅ Off-session monthly billing using Bacs mandates
  * ============================================================
  */
 
 import express from "express";
 import Stripe from "stripe";
 import dotenv from "dotenv";
-import pool from "../db.js";
+import { pool } from "../db.js";
 import { sendEmail } from "../utils/email.js";
 import {
   paymentRequestTemplate,
@@ -23,32 +23,35 @@ import {
 } from "../utils/emailTemplates.js";
 
 dotenv.config();
-
 const router = express.Router();
-
-// ✅ Let Stripe use the account’s default API version (don’t pin here)
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// ------------------------------------------------------------
-// Small helper: sum of paid payments for an order by type
-// ------------------------------------------------------------
+const FRONTEND_URL =
+  process.env.FRONTEND_URL ||
+  (process.env.NODE_ENV === "development"
+    ? "http://localhost:5173"
+    : "https://www.pjhwebservices.co.uk");
+
+/* ------------------------------------------------------------
+   Helper: Get total already paid for an order (optionally by type)
+------------------------------------------------------------ */
 async function getAlreadyPaid(orderId, type) {
   const { rows } = await pool.query(
     `
-    SELECT COALESCE(SUM(amount),0)::numeric AS paid
-    FROM payments
-    WHERE order_id = $1
-      AND status = 'paid'
-      AND ($2::text IS NULL OR type = $2)
-  `,
+      SELECT COALESCE(SUM(amount),0)::numeric AS paid
+      FROM payments
+      WHERE order_id = $1
+        AND status = 'paid'
+        AND ($2::text IS NULL OR type = $2)
+    `,
     [orderId, type || null]
   );
   return Number(rows[0]?.paid || 0);
 }
 
-// ------------------------------------------------------------
-// Ensure Stripe Customer exists (stores ID on customers table)
-// ------------------------------------------------------------
+/* ------------------------------------------------------------
+   Helper: Ensure Stripe customer exists
+------------------------------------------------------------ */
 async function ensureStripeCustomer(customer) {
   if (customer.stripe_customer_id) return customer.stripe_customer_id;
 
@@ -68,54 +71,55 @@ async function ensureStripeCustomer(customer) {
     `UPDATE customers SET stripe_customer_id = $1 WHERE id = $2`,
     [sc.id, customer.id]
   );
+
   return sc.id;
 }
 
-const FRONTEND_URL =
-  process.env.FRONTEND_URL ||
-  (process.env.NODE_ENV === "development"
-    ? "http://localhost:5173"
-    : "https://www.pjhwebservices.co.uk");
-
 /* ============================================================
    💳 Create Checkout (Card / Bacs / Setup)
-   Body: { orderId, flow: "card_payment"|"bacs_payment"|"bacs_setup", type?: "deposit"|"balance" }
 ============================================================ */
 router.post("/create-checkout", async (req, res) => {
   try {
     const { orderId, flow, type } = req.body;
 
-    if (!orderId) return res.status(400).json({ success: false, error: "Missing orderId." });
-    if (!["card_payment", "bacs_payment", "bacs_setup"].includes(flow)) {
+    if (!orderId)
+      return res.status(400).json({ success: false, error: "Missing orderId." });
+    if (!["card_payment", "bacs_payment", "bacs_setup"].includes(flow))
       return res.status(400).json({ success: false, error: "Invalid flow." });
-    }
-    if ((flow === "card_payment" || flow === "bacs_payment") && !["deposit", "balance"].includes(type)) {
-      return res.status(400).json({ success: false, error: "Missing or invalid type for payment." });
-    }
+
+    if (
+      (flow === "card_payment" || flow === "bacs_payment") &&
+      !["deposit", "balance"].includes(type)
+    )
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing or invalid type for payment." });
 
     // Load order + customer
     const { rows } = await pool.query(
       `
-      SELECT
-        o.*,
-        c.id   AS cid,
-        c.name AS customer_name,
-        c.email,
-        c.stripe_customer_id,
-        c.stripe_mandate_id,
-        c.direct_debit_active
-      FROM orders o
-      JOIN customers c ON c.id = o.customer_id
-      WHERE o.id = $1
-    `,
+        SELECT
+          o.*,
+          c.id AS cid,
+          c.name AS customer_name,
+          c.email,
+          c.stripe_customer_id,
+          c.stripe_mandate_id,
+          c.direct_debit_active
+        FROM orders o
+        JOIN customers c ON c.id = o.customer_id
+        WHERE o.id = $1
+      `,
       [orderId]
     );
-    if (!rows.length) return res.status(404).json({ success: false, error: "Order not found." });
+
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: "Order not found." });
+
     const order = rows[0];
 
-    // Ensure Stripe customer
     const stripeCustomerId = await ensureStripeCustomer({
-      id: order.customer_id,
+      id: order.cid,
       name: order.customer_name,
       email: order.email,
       stripe_customer_id: order.stripe_customer_id,
@@ -125,30 +129,32 @@ router.post("/create-checkout", async (req, res) => {
       business: order.business,
     });
 
-    // 🧮 Determine amount dynamically (remaining deposit/balance)
+    // 🧮 Calculate amount
     let amount = 0;
     let lineName = "Setup Direct Debit";
+
     if (flow !== "bacs_setup") {
-      const originalAmount = type === "deposit" ? Number(order.deposit) : Number(order.balance);
+      const originalAmount =
+        type === "deposit" ? Number(order.deposit) : Number(order.balance);
       const alreadyPaid = await getAlreadyPaid(order.id, type);
       amount = Math.max(originalAmount - alreadyPaid, 0);
 
-      if (!amount) {
+      if (amount <= 0) {
         return res.status(400).json({
           success: false,
           error: `No outstanding ${type} amount (already settled).`,
         });
       }
+
       lineName = `${type === "deposit" ? "Deposit" : "Balance"} — ${order.title}`;
     }
 
     const metadata = {
       order_id: String(order.id),
-      customer_id: String(order.customer_id),
+      customer_id: String(order.cid || order.customer_id),
       payment_type: flow === "bacs_setup" ? "setup" : type,
     };
 
-    // 🧾 Build a Checkout Session
     let session;
     if (flow === "card_payment") {
       session = await stripe.checkout.sessions.create({
@@ -189,7 +195,7 @@ router.post("/create-checkout", async (req, res) => {
         metadata,
       });
     } else {
-      // Direct Debit mandate setup only (no charge)
+      // Setup only
       session = await stripe.checkout.sessions.create({
         mode: "setup",
         customer: stripeCustomerId,
@@ -200,7 +206,7 @@ router.post("/create-checkout", async (req, res) => {
       });
     }
 
-    // 💌 Email payment/setup link to customer
+    // 💌 Email link
     await sendEmail({
       to: order.email,
       subject:
@@ -219,14 +225,14 @@ router.post("/create-checkout", async (req, res) => {
     return res.json({ success: true, url: session.url });
   } catch (err) {
     console.error("❌ create-checkout error:", err);
-    return res.status(500).json({ success: false, error: err.message || "Failed to create session." });
+    return res
+      .status(500)
+      .json({ success: false, error: err.message || "Failed to create session." });
   }
 });
 
 /* ============================================================
-   🔁 Webhook — expose as a handler that MUST be mounted with raw body
-   Usage in server:
-     app.post("/api/payments/webhook", express.raw({ type: "application/json" }), paymentsWebhook)
+   🔁 Webhook — Reconcile payments
 ============================================================ */
 export async function paymentsWebhook(req, res) {
   let event;
@@ -245,16 +251,14 @@ export async function paymentsWebhook(req, res) {
 
   try {
     switch (event.type) {
-      // ✅ Checkout completed (covers both mode: payment and mode: setup)
+      // ✅ Checkout completed
       case "checkout.session.completed": {
         const session = data;
 
-        // If this was a setup session, persist mandate on the customer
         if (session.mode === "setup") {
           const si = await stripe.setupIntents.retrieve(session.setup_intent);
           let mandateId = si.mandate || null;
 
-          // Some accounts store mandate on the payment method
           if (!mandateId && si.payment_method) {
             const pm = await stripe.paymentMethods.retrieve(si.payment_method);
             mandateId = pm?.bacs_debit?.mandate || null;
@@ -262,32 +266,28 @@ export async function paymentsWebhook(req, res) {
 
           if (mandateId) {
             await pool.query(
-              `
-              UPDATE customers
-              SET stripe_mandate_id = $1, direct_debit_active = TRUE
-              WHERE stripe_customer_id = $2
-            `,
+              `UPDATE customers
+               SET stripe_mandate_id = $1, direct_debit_active = TRUE
+               WHERE stripe_customer_id = $2`,
               [mandateId, session.customer]
             );
             console.log(`✅ Stored Bacs mandate ${mandateId} for ${session.customer}`);
           }
         }
 
-        // If this was a payment session, record payment now too (belts & braces)
         if (session.mode === "payment") {
           const amount = Number(session.amount_total || 0) / 100;
-          const orderId = Number(session.metadata?.order_id || 0) || null;
-          const customerId = Number(session.metadata?.customer_id || 0) || null;
+          const orderId = Number(session.metadata?.order_id || 0);
+          const customerId = Number(session.metadata?.customer_id || 0);
           const paymentType = session.metadata?.payment_type || "card";
           const method = (session.payment_method_types || [])[0] || "card";
 
           if (orderId && amount > 0) {
             await pool.query(
-              `
-              INSERT INTO payments (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid')
-              ON CONFLICT (stripe_event_id) DO NOTHING
-            `,
+              `INSERT INTO payments
+                 (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid')
+               ON CONFLICT (stripe_event_id) DO NOTHING`,
               [
                 event.id,
                 orderId,
@@ -300,41 +300,53 @@ export async function paymentsWebhook(req, res) {
               ]
             );
 
-            await pool.query(
-              `UPDATE orders SET total_paid = COALESCE(total_paid,0) + $1 WHERE id = $2`,
-              [amount, orderId]
-            );
+            const flagCol =
+              paymentType === "deposit"
+                ? "deposit_paid"
+                : paymentType === "balance"
+                ? "balance_paid"
+                : null;
 
+            const query = flagCol
+              ? `UPDATE orders SET total_paid = COALESCE(total_paid,0) + $1, ${flagCol}=TRUE, updated_at=NOW() WHERE id=$2`
+              : `UPDATE orders SET total_paid = COALESCE(total_paid,0) + $1, updated_at=NOW() WHERE id=$2`;
+
+            await pool.query(query, [amount, orderId]);
             console.log(`💰 Recorded payment £${amount} for order ${orderId}`);
           }
         }
         break;
       }
 
-      // ✅ PaymentIntent-level success (covers alternate routes)
       case "payment_intent.succeeded": {
         const pi = data;
-        const orderId = Number(pi.metadata?.order_id || 0) || null;
-        const customerId = Number(pi.metadata?.customer_id || 0) || null;
+        const orderId = Number(pi.metadata?.order_id || 0);
+        const customerId = Number(pi.metadata?.customer_id || 0);
         const amount = Number(pi.amount_received || 0) / 100;
         const paymentType = pi.metadata?.payment_type || "card";
         const method = (pi.payment_method_types || [])[0] || "card";
 
         if (orderId && amount > 0) {
           await pool.query(
-            `
-            INSERT INTO payments (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid')
-            ON CONFLICT (stripe_event_id) DO NOTHING
-          `,
+            `INSERT INTO payments
+               (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid')
+             ON CONFLICT (stripe_event_id) DO NOTHING`,
             [event.id, orderId, customerId, amount, paymentType, method, pi.id, pi.status]
           );
 
-          await pool.query(
-            `UPDATE orders SET total_paid = COALESCE(total_paid,0) + $1 WHERE id = $2`,
-            [amount, orderId]
-          );
+          const flagCol =
+            paymentType === "deposit"
+              ? "deposit_paid"
+              : paymentType === "balance"
+              ? "balance_paid"
+              : null;
 
+          const query = flagCol
+            ? `UPDATE orders SET total_paid = COALESCE(total_paid,0) + $1, ${flagCol}=TRUE, updated_at=NOW() WHERE id=$2`
+            : `UPDATE orders SET total_paid = COALESCE(total_paid,0) + $1, updated_at=NOW() WHERE id=$2`;
+
+          await pool.query(query, [amount, orderId]);
           console.log(`💰 Recorded PI payment £${amount} for order ${orderId}`);
         }
         break;
@@ -342,24 +354,24 @@ export async function paymentsWebhook(req, res) {
 
       case "payment_intent.payment_failed": {
         const pi = data;
-        const orderId = Number(pi.metadata?.order_id || 0) || null;
-        const customerId = Number(pi.metadata?.customer_id || 0) || null;
+        const orderId = Number(pi.metadata?.order_id || 0);
+        const customerId = Number(pi.metadata?.customer_id || 0);
         const amount = Number(pi.amount || 0) / 100;
-        const paymentType = pi.metadata?.payment_type || "card";
-        const method = (pi.payment_method_types || [])[0] || "card";
 
         await pool.query(
-          `
-          INSERT INTO payments (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'failed')
-          ON CONFLICT (stripe_event_id) DO NOTHING
-        `,
-          [event.id, orderId, customerId, amount, paymentType, method, pi.id, pi.status]
+          `INSERT INTO payments
+             (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'failed')
+           ON CONFLICT (stripe_event_id) DO NOTHING`,
+          [event.id, orderId, customerId, amount, pi.metadata?.payment_type || "card", "card", pi.id, pi.status]
         );
 
         if (customerId) {
-          const cust = await pool.query(`SELECT name, email FROM customers WHERE id=$1`, [customerId]);
-          const c = cust.rows[0];
+          const { rows } = await pool.query(
+            `SELECT name, email FROM customers WHERE id=$1`,
+            [customerId]
+          );
+          const c = rows[0];
           if (c?.email) {
             await sendEmail({
               to: c.email,
@@ -368,7 +380,6 @@ export async function paymentsWebhook(req, res) {
             });
           }
         }
-
         console.warn(`⚠️ Payment failed for order ${orderId || "unknown"} (${pi.id})`);
         break;
       }
@@ -385,7 +396,6 @@ export async function paymentsWebhook(req, res) {
       }
 
       default:
-        // Useful during early integration
         console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
     }
 
@@ -398,24 +408,22 @@ export async function paymentsWebhook(req, res) {
 
 /* ============================================================
    🔁 Monthly Recurring Billing (Direct Debit off-session)
-   Body: { amount, description? }
 ============================================================ */
 router.post("/bill-recurring", async (req, res) => {
   try {
     const { amount, description } = req.body;
-    if (!amount || Number(amount) <= 0) {
-      return res.status(400).json({ success: false, error: "Missing/invalid amount." });
-    }
+    if (!amount || Number(amount) <= 0)
+      return res
+        .status(400)
+        .json({ success: false, error: "Missing or invalid amount." });
 
-    const { rows } = await pool.query(
-      `
+    const { rows } = await pool.query(`
       SELECT id, name, email, stripe_customer_id, stripe_mandate_id
       FROM customers
       WHERE direct_debit_active = TRUE
         AND stripe_customer_id IS NOT NULL
         AND stripe_mandate_id IS NOT NULL
-    `
-    );
+    `);
 
     for (const c of rows) {
       try {
@@ -424,9 +432,7 @@ router.post("/bill-recurring", async (req, res) => {
           currency: "gbp",
           customer: c.stripe_customer_id,
           payment_method_types: ["bacs_debit"],
-          payment_method_options: {
-            bacs_debit: { mandate: c.stripe_mandate_id },
-          },
+          payment_method_options: { bacs_debit: { mandate: c.stripe_mandate_id } },
           confirm: true,
           off_session: true,
           description: description || "PJH Monthly Maintenance",
