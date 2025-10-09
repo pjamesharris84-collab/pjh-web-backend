@@ -1,10 +1,11 @@
 /**
  * ============================================================
- * PJH Web Services — Invoice Generator (2025 Final)
+ * PJH Web Services — Invoice Generator (2025 Final + Logo)
  * ============================================================
  * ✅ Auto-calculates balance_due
  * ✅ Professional brand layout (PJH blue/grey)
  * ✅ Includes customer + order details
+ * ✅ Adds top-right PJH Web Services logo
  * ✅ Generates dynamic filenames & saves to /public/invoices
  * ✅ Compatible with email + preview routes
  * ============================================================
@@ -70,14 +71,42 @@ export async function generateInvoicePDF(order, type = "deposit") {
   const margin = 50;
   const width = A4[0];
   let y = A4[1] - 60;
-
   const page = pdfDoc.addPage(A4);
 
   /* ------------------------------------------------------------
-     HEADER
+     HEADER + LOGO
   ------------------------------------------------------------ */
+  try {
+    const logoPath = path.resolve(process.cwd(), "public", "assets", "pjh-logo-dark.png");
+    if (fs.existsSync(logoPath)) {
+      const logoBytes = fs.readFileSync(logoPath);
+      const logoImage = await pdfDoc.embedPng(logoBytes);
+
+      const logoWidth = 90;
+      const logoHeight = (logoImage.height / logoImage.width) * logoWidth;
+      page.drawImage(logoImage, {
+        x: width - margin - logoWidth,
+        y: A4[1] - margin - logoHeight,
+        width: logoWidth,
+        height: logoHeight,
+      });
+    } else {
+      console.warn("⚠️ Logo not found at /public/assets/pjh-logo-dark.png — skipping.");
+    }
+  } catch (err) {
+    console.warn("⚠️ Failed to embed logo:", err.message);
+  }
+
   drawText(page, "PJH Web Services", margin, y, 16, bold, BRAND_BLUE);
-  drawRightText(page, `${type === "deposit" ? "Deposit Invoice" : "Balance Invoice"}`, width - margin, y, 18, bold, BRAND_BLUE);
+  drawRightText(
+    page,
+    `${type === "deposit" ? "Deposit Invoice" : "Balance Invoice"}`,
+    width - margin - 100,
+    y,
+    18,
+    bold,
+    BRAND_BLUE
+  );
   y -= 25;
   drawText(page, "www.pjhwebservices.co.uk", margin, y, 10, font, TEXT_GREY);
   drawText(page, "info@pjhwebservices.co.uk  •  07587 707 981", margin, y - 12, 10, font, TEXT_GREY);
