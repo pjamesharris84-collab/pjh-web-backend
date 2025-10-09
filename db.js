@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * PJH Web Services — Database Setup & Migrations
+ * PJH Web Services — Database Setup & Migrations (Fixed Version)
  * ============================================================
  * Centralised PostgreSQL pool setup and schema management.
  * Handles:
@@ -77,14 +77,11 @@ async function runCustomerMigration() {
       county VARCHAR(100),
       postcode VARCHAR(20),
       notes TEXT,
-
-      -- 💳 Stripe / Direct Debit fields
       stripe_customer_id TEXT,
       stripe_mandate_id TEXT,
       direct_debit_active BOOLEAN DEFAULT false,
       payment_method VARCHAR(50) DEFAULT 'card'
         CHECK (payment_method IN ('card','direct_debit','mixed')),
-
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -159,13 +156,10 @@ async function runOrderMigration() {
       deposit_paid BOOLEAN DEFAULT false,
       balance_paid BOOLEAN DEFAULT false,
       total_paid NUMERIC(10,2) DEFAULT 0,
-
-      -- 🔁 Recurring payments
       recurring BOOLEAN DEFAULT false,
       recurring_amount NUMERIC(10,2),
       recurring_interval VARCHAR(20) DEFAULT 'monthly',
       recurring_active BOOLEAN DEFAULT false,
-
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -187,18 +181,32 @@ async function runPaymentMigration() {
       notes TEXT,
       recorded_by VARCHAR(100),
       reconciled BOOLEAN DEFAULT false,
-
-      -- 🔗 Stripe tracking
       stripe_session_id VARCHAR(255),
       stripe_payment_intent VARCHAR(255),
       stripe_event_id VARCHAR(255) UNIQUE,
       stripe_status VARCHAR(50),
-
       status VARCHAR(50) DEFAULT 'pending'
         CHECK (status IN ('pending','paid','failed','cancelled','refunded')),
       created_at TIMESTAMP DEFAULT NOW()
     );
   `);
+
+  // 🩹 Ensure 'status' column exists in existing Render DBs
+  const check = await pool.query(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_name = 'payments' AND column_name = 'status';
+  `);
+
+  if (check.rows.length === 0) {
+    console.log("🩹 Patching: adding missing 'status' column to payments...");
+    await pool.query(`
+      ALTER TABLE payments
+      ADD COLUMN status VARCHAR(50) DEFAULT 'pending'
+      CHECK (status IN ('pending','paid','failed','cancelled','refunded'));
+    `);
+    console.log("✅ 'status' column added successfully.");
+  }
 }
 
 /* ------------------------------------------------------------
@@ -289,7 +297,7 @@ export async function runMigrations() {
     await runPackageMigration();
     await runQuoteMigration();
     await runOrderMigration();
-    await runPaymentMigration();
+    await runPaymentMigration(); // includes self-healing patch
     await seedDefaultPackages();
     await pool.query("COMMIT");
     console.log("✅ Migrations + patches completed successfully.");
