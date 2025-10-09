@@ -4,8 +4,8 @@
  * ============================================================
  * Centralised PostgreSQL pool setup and schema management.
  * Handles:
- *   • Initial migrations
- *   • Schema patching
+ *   • Non-destructive schema migration (no data loss)
+ *   • Automatic table creation + patching
  *   • Default package seeding
  *   • Stripe Direct Debit + recurring payment tracking
  *   • Auto-updated timestamps + indexed relationships
@@ -64,31 +64,19 @@ pool.on("error", (err) => {
 });
 
 /* ------------------------------------------------------------
-   🧱 MIGRATIONS
+   🧱 SAFE MIGRATIONS (NO DATA LOSS)
 ------------------------------------------------------------ */
 export async function runMigrations() {
-  console.log("🚀 Rebuilding PostgreSQL schema from scratch...");
+  console.log("🚀 Running PostgreSQL migrations (non-destructive)...");
 
   try {
     await pool.query("BEGIN");
 
-    // =========================================================
-    // 1️⃣ Drop all old tables (safe reset)
-    // =========================================================
+    /* ------------------------------------------------------------
+       1️⃣ Create missing tables
+    ------------------------------------------------------------ */
     await pool.query(`
-      DROP TABLE IF EXISTS payments CASCADE;
-      DROP TABLE IF EXISTS orders CASCADE;
-      DROP TABLE IF EXISTS quotes CASCADE;
-      DROP TABLE IF EXISTS packages CASCADE;
-      DROP TABLE IF EXISTS customers CASCADE;
-    `);
-    console.log("🧹 Old tables dropped (if any existed).");
-
-    // =========================================================
-    // 2️⃣ Create all new tables (fresh schema)
-    // =========================================================
-    await pool.query(`
-      CREATE TABLE customers (
+      CREATE TABLE IF NOT EXISTS customers (
         id SERIAL PRIMARY KEY,
         business VARCHAR(255),
         name VARCHAR(255) NOT NULL,
@@ -109,7 +97,7 @@ export async function runMigrations() {
         updated_at TIMESTAMP DEFAULT NOW()
       );
 
-      CREATE TABLE packages (
+      CREATE TABLE IF NOT EXISTS packages (
         id SERIAL PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
         tagline VARCHAR(255),
@@ -124,7 +112,7 @@ export async function runMigrations() {
         updated_at TIMESTAMP DEFAULT NOW()
       );
 
-      CREATE TABLE quotes (
+      CREATE TABLE IF NOT EXISTS quotes (
         id SERIAL PRIMARY KEY,
         customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
         package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,
@@ -146,7 +134,7 @@ export async function runMigrations() {
         updated_at TIMESTAMP DEFAULT NOW()
       );
 
-      CREATE TABLE orders (
+      CREATE TABLE IF NOT EXISTS orders (
         id SERIAL PRIMARY KEY,
         customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
         quote_id INTEGER UNIQUE REFERENCES quotes(id) ON DELETE SET NULL,
@@ -172,7 +160,7 @@ export async function runMigrations() {
         updated_at TIMESTAMP DEFAULT NOW()
       );
 
-      CREATE TABLE payments (
+      CREATE TABLE IF NOT EXISTS payments (
         id SERIAL PRIMARY KEY,
         order_id INT REFERENCES orders(id) ON DELETE CASCADE,
         customer_id INT REFERENCES customers(id) ON DELETE SET NULL,
@@ -194,11 +182,11 @@ export async function runMigrations() {
       );
     `);
 
-    console.log("✅ Core tables recreated successfully.");
+    console.log("✅ Core tables verified/created.");
 
-    // =========================================================
-    // 3️⃣ Timestamp triggers
-    // =========================================================
+    /* ------------------------------------------------------------
+       2️⃣ Timestamp triggers (auto-update updated_at)
+    ------------------------------------------------------------ */
     await pool.query(`
       CREATE OR REPLACE FUNCTION update_timestamp()
       RETURNS TRIGGER AS $$
@@ -208,99 +196,132 @@ export async function runMigrations() {
       END;
       $$ LANGUAGE plpgsql;
 
-      CREATE TRIGGER update_orders_timestamp
-      BEFORE UPDATE ON orders
-      FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_orders_timestamp') THEN
+          CREATE TRIGGER update_orders_timestamp
+          BEFORE UPDATE ON orders
+          FOR EACH ROW
+          EXECUTE FUNCTION update_timestamp();
+        END IF;
 
-      CREATE TRIGGER update_customers_timestamp
-      BEFORE UPDATE ON customers
-      FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_customers_timestamp') THEN
+          CREATE TRIGGER update_customers_timestamp
+          BEFORE UPDATE ON customers
+          FOR EACH ROW
+          EXECUTE FUNCTION update_timestamp();
+        END IF;
+      END$$;
     `);
-    console.log("🕒 Timestamp triggers added.");
 
-    // =========================================================
-    // 4️⃣ Helpful indexes
-    // =========================================================
+    console.log("🕒 Timestamp triggers ensured.");
+
+    /* ------------------------------------------------------------
+       3️⃣ Index optimisation
+    ------------------------------------------------------------ */
     await pool.query(`
-      CREATE INDEX idx_orders_customer_id ON orders(customer_id);
-      CREATE INDEX idx_payments_order_id ON payments(order_id);
-      CREATE INDEX idx_quotes_customer_id ON quotes(customer_id);
+      CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
+      CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
+      CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
     `);
-    console.log("⚡ Indexes created for performance.");
 
-    // =========================================================
-    // 5️⃣ Default package seeding
-    // =========================================================
-    const defaults = [
-      {
-        name: "Starter",
-        tagline: "Perfect for small business websites",
-        price_oneoff: 900,
-        price_monthly: 60,
-        term_months: 24,
-        features: ["4–6 pages", "Responsive design", "Basic SEO", "Hosting setup"],
-      },
-      {
-        name: "Business",
-        tagline: "For growing companies needing automation",
-        price_oneoff: 2600,
-        price_monthly: 140,
-        term_months: 24,
-        features: [
-          "All Starter features",
-          "Booking system",
-          "Invoicing tools",
-          "CRM core",
-        ],
-      },
-      {
-        name: "Premium",
-        tagline: "Full bespoke CRM + integrations",
-        price_oneoff: 6000,
-        price_monthly: 300,
-        term_months: 24,
-        features: [
-          "All Business features",
-          "Custom APIs",
-          "Automations",
-          "Priority support",
-        ],
-      },
-    ];
+    console.log("⚡ Indexes confirmed.");
 
-    for (const pkg of defaults) {
-      const guardrails = {
-        require_deposit_months: 1,
-        min_term_months: pkg.term_months,
-        early_exit_fee_pct: 40,
-        ownership_until_paid: true,
-        late_fee_pct: 5,
-        default_payment_method: "direct_debit",
-        tcs_version: "2025-01",
-      };
+    /* ------------------------------------------------------------
+       4️⃣ Self-heal 'status' column in payments if missing
+    ------------------------------------------------------------ */
+    const check = await pool.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name='payments' AND column_name='status';
+    `);
+    if (check.rows.length === 0) {
+      console.log("🩹 Adding missing 'status' column...");
+      await pool.query(`
+        ALTER TABLE payments
+        ADD COLUMN status VARCHAR(50) DEFAULT 'pending'
+        CHECK (status IN ('pending','paid','failed','cancelled','refunded'));
+      `);
+    }
 
-      await pool.query(
-        `INSERT INTO packages
-        (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails)
-        VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb);`,
-        [
-          pkg.name,
-          pkg.tagline,
-          pkg.price_oneoff,
-          pkg.price_monthly,
-          pkg.term_months,
-          pkg.features,
-          JSON.stringify(guardrails),
-        ]
-      );
+    /* ------------------------------------------------------------
+       5️⃣ Seed default packages if empty
+    ------------------------------------------------------------ */
+    const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM packages;");
+    if (rows[0].count === 0) {
+      const defaults = [
+        {
+          name: "Starter",
+          tagline: "Perfect for small business websites",
+          price_oneoff: 900,
+          price_monthly: 60,
+          term_months: 24,
+          features: ["4–6 pages", "Responsive design", "Basic SEO", "Hosting setup"],
+        },
+        {
+          name: "Business",
+          tagline: "For growing companies needing automation",
+          price_oneoff: 2600,
+          price_monthly: 140,
+          term_months: 24,
+          features: [
+            "All Starter features",
+            "Booking system",
+            "Invoicing tools",
+            "CRM core",
+          ],
+        },
+        {
+          name: "Premium",
+          tagline: "Full bespoke CRM + integrations",
+          price_oneoff: 6000,
+          price_monthly: 300,
+          term_months: 24,
+          features: [
+            "All Business features",
+            "Custom APIs",
+            "Automations",
+            "Priority support",
+          ],
+        },
+      ];
+
+      for (const pkg of defaults) {
+        const guardrails = {
+          require_deposit_months: 1,
+          min_term_months: pkg.term_months,
+          early_exit_fee_pct: 40,
+          ownership_until_paid: true,
+          late_fee_pct: 5,
+          default_payment_method: "direct_debit",
+          tcs_version: "2025-01",
+        };
+
+        await pool.query(
+          `INSERT INTO packages
+           (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails)
+           VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb);`,
+          [
+            pkg.name,
+            pkg.tagline,
+            pkg.price_oneoff,
+            pkg.price_monthly,
+            pkg.term_months,
+            pkg.features,
+            JSON.stringify(guardrails),
+          ]
+        );
+      }
+
+      console.log("🌱 Default packages seeded successfully.");
+    } else {
+      console.log(`🌱 ${rows[0].count} packages already exist — skipping seed.`);
     }
 
     await pool.query("COMMIT");
-    console.log("🌱 Default packages seeded successfully.");
-    console.log("✅ Database rebuild complete!");
+    console.log("✅ Migrations completed safely — no data lost!");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
-    console.error("❌ Migration rebuild failed:", err.message);
+    console.error("❌ Migration error:", err.message);
   }
 }
 
