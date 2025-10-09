@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * PJH Web Services — Database Setup & Migrations (Fixed Version)
+ * PJH Web Services — Database Setup & Migrations (2025 Stable)
  * ============================================================
  * Centralised PostgreSQL pool setup and schema management.
  * Handles:
@@ -8,6 +8,7 @@
  *   • Schema patching
  *   • Default package seeding
  *   • Stripe Direct Debit + recurring payment tracking
+ *   • Auto-updated timestamps + indexed relationships
  * ============================================================
  */
 
@@ -16,11 +17,11 @@ import pkg from "pg";
 import crypto from "crypto";
 dotenv.config();
 
+const { Pool } = pkg;
+
 // ✅ Ensure fallback environment variables
 process.env.NODE_ENV = process.env.NODE_ENV || "development";
 process.env.PORT = process.env.PORT || "5000";
-
-const { Pool } = pkg;
 
 /* ------------------------------------------------------------
    🧩 CONNECTION SETUP
@@ -195,15 +196,14 @@ async function runPaymentMigration() {
     );
   `);
 
-  // 🩹 Ensure 'status' column exists in existing Render DBs
+  // 🩹 Self-healing: ensure 'status' column exists
   const check = await pool.query(`
     SELECT column_name
     FROM information_schema.columns
     WHERE table_name = 'payments' AND column_name = 'status';
   `);
-
   if (check.rows.length === 0) {
-    console.log("🩹 Patching: adding missing 'status' column to payments...");
+    console.log("🩹 Adding missing 'status' column to payments...");
     await pool.query(`
       ALTER TABLE payments
       ADD COLUMN status VARCHAR(50) DEFAULT 'pending'
@@ -211,6 +211,48 @@ async function runPaymentMigration() {
     `);
     console.log("✅ 'status' column added successfully.");
   }
+}
+
+/* ------------------------------------------------------------
+   🕒 TIMESTAMP TRIGGER (Auto-update 'updated_at')
+------------------------------------------------------------ */
+async function runTimestampTrigger() {
+  await pool.query(`
+    CREATE OR REPLACE FUNCTION update_timestamp()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      NEW.updated_at = NOW();
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_orders_timestamp') THEN
+        CREATE TRIGGER update_orders_timestamp
+        BEFORE UPDATE ON orders
+        FOR EACH ROW
+        EXECUTE FUNCTION update_timestamp();
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_customers_timestamp') THEN
+        CREATE TRIGGER update_customers_timestamp
+        BEFORE UPDATE ON customers
+        FOR EACH ROW
+        EXECUTE FUNCTION update_timestamp();
+      END IF;
+    END$$;
+  `);
+}
+
+/* ------------------------------------------------------------
+   ⚡ INDEX OPTIMISATION
+------------------------------------------------------------ */
+async function runIndexSetup() {
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
+    CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
+  `);
 }
 
 /* ------------------------------------------------------------
@@ -301,10 +343,12 @@ export async function runMigrations() {
     await runPackageMigration();
     await runQuoteMigration();
     await runOrderMigration();
-    await runPaymentMigration(); // includes self-healing patch
+    await runPaymentMigration();
+    await runTimestampTrigger();
+    await runIndexSetup();
     await seedDefaultPackages();
     await pool.query("COMMIT");
-    console.log("✅ Migrations + patches completed successfully.");
+    console.log("✅ Migrations + triggers + indexes complete.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("❌ Migration error:", err.message);
