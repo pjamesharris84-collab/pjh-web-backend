@@ -81,8 +81,7 @@ router.post("/", async (req, res) => {
       ]
     );
 
-    if (!rows.length)
-      throw new Error("Customer insert returned no data.");
+    if (!rows.length) throw new Error("Customer insert returned no data.");
 
     const customer = rows[0];
     console.log(`✅ [DB] Customer created: ${customer.name} (ID: ${customer.id})`);
@@ -116,7 +115,7 @@ router.get("/:id", async (req, res) => {
       });
     }
 
-    // Align with frontend expectation → return { success, data: {...} }
+    // Align with frontend expectation → return { success, data, customer }
     res.json({ success: true, data: rows[0], customer: rows[0] });
   } catch (err) {
     console.error("❌ [DB] Error fetching customer:", err);
