@@ -26,12 +26,14 @@ dotenv.config();
 const app = express();
 
 /* ============================================================
-   🌍 CORS Configuration (Local + Live)
+   🌍 CORS Configuration (Local + Live + Vercel)
 ============================================================ */
 const defaultOrigins = [
   "http://localhost:5173",
   "https://pjhwebservices.co.uk",
   "https://www.pjhwebservices.co.uk",
+  "https://pjh-web-frontend.vercel.app",
+  "https://pjh-web-frontend-dh9sx9tba-pj-harris-projects.vercel.app",
 ];
 
 const allowedOrigins = (
@@ -45,7 +47,14 @@ const allowedOrigins = (
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      // ✅ Allow localhost, live domains, and any .vercel.app preview
+      if (
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        /\.vercel\.app$/.test(origin)
+      ) {
+        return callback(null, true);
+      }
       console.warn(`🚫 Blocked CORS: ${origin}`);
       return callback(new Error("Not allowed by CORS"), false);
     },
@@ -77,8 +86,7 @@ console.table({
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET ? "✅" : "❌",
   DATABASE_URL: process.env.DATABASE_URL ? "✅" : "❌",
   FRONTEND_URL:
-    process.env.FRONTEND_URL ||
-    "https://www.pjhwebservices.co.uk",
+    process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk",
 });
 
 /* ============================================================
@@ -180,5 +188,6 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on port: ${PORT}`);
-  console.log("🌍 Allowed Origins:", allowedOrigins);
+  console.log("🌍 Allowed Origins:");
+  allowedOrigins.forEach((o) => console.log("   •", o));
 });
