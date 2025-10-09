@@ -1,0 +1,94 @@
+# ============================================================
+# PJH Web Services — Backend Git Ignore
+# ============================================================
+
+# === Node.js / NPM ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# === Environment & Secrets ===
+.env
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
+
+# === Logs & Reports ===
+logs/
+*.log
+debug.log
+error.log
+*.pid
+*.seed
+*.seed.sql
+coverage/
+
+# === System Files ===
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# === Build & Cache ===
+dist/
+build/
+.cache/
+.tmp/
+*.tmp
+*.bak
+
+# === Database Dumps ===
+*.sql
+*.sqlite
+*.db
+pgdata/
+migrations_backup/
+
+# === Public Generated Files ===
+public/invoices/
+public/tmp/
+public/uploads/
+generated/
+uploads/
+__pycache__/
+
+# === Test Output ===
+jest/
+cypress/videos/
+cypress/screenshots/
+test-results/
+
+# === Local Tools & OS ===
+*.local
+*.sublime-project
+*.sublime-workspace
+
+# === Render / Deployment ===
+render.yaml
+.vercel
+.vercel_build_output
+.netlify
+*.tar.gz
+*.zip
+
+# === Stripe CLI cache ===
+.stripe/
+stripe.log
+
+# === PDFKit / Invoice Outputs ===
+invoices/
+public/invoices/
+generated/invoices/
+
+# === Coverage / Reports ===
+coverage/
+.nyc_output/
+lcov-report/
+
+# === GitHub Artifacts ===
+*.orig
+*.rej
