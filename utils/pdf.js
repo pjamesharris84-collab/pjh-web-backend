@@ -1,12 +1,10 @@
 /**
  * ============================================================
- * PJH Web Services — Quote PDF Generator (2025 Update)
+ * PJH Web Services — Quote PDF Generator (Fixed Alignment)
  * ============================================================
- * Features:
- *  • Matches new AdminQuoteRecord.js (weighted line items & discounts)
- *  • Includes global discount, deposit, and balance sections
- *  • Auto-wraps long text for perfect print layout
- *  • Professional layout with brand colors, logo, and footer
+ * • Perfectly aligned line-item table (like original version)
+ * • Keeps discounts, subtotal, deposit, and balance sections
+ * • Consistent right alignment for all numeric columns
  * ============================================================
  */
 
@@ -17,7 +15,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 // -----------------------------------------------------------------------------
 // BRAND COLOURS
 // -----------------------------------------------------------------------------
-const BRAND_BLUE = rgb(0.15, 0.38, 0.92); // #2563EB
+const BRAND_BLUE = rgb(0.15, 0.38, 0.92);
 const LIGHT_GREY = rgb(0.96, 0.97, 0.99);
 const BORDER_GREY = rgb(0.8, 0.8, 0.85);
 const TEXT_GREY = rgb(0.15, 0.15, 0.15);
@@ -77,7 +75,6 @@ export async function generateQuotePDF(row) {
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
-  // Layout constants
   const A4 = [595, 842];
   const margin = 50;
   const contentRight = A4[0] - margin;
@@ -94,7 +91,7 @@ export async function generateQuotePDF(row) {
   let { width, height } = page.getSize();
   let y = height - 60;
 
-  // Try to load logo
+  // Logo
   const logoPath = path.resolve(process.cwd(), "client", "public", "pjh-logo-dark.png");
   let logoHeight = 0;
   try {
@@ -119,7 +116,7 @@ export async function generateQuotePDF(row) {
     logoHeight = 20;
   }
 
-  // Contact details (right)
+  // Contact details
   drawRightText(page, "PJH Web Services", contentRight, y - 5, h2, bold);
   drawRightText(page, "Professional Digital Services", contentRight, y - 22, bodySize, font);
   drawRightText(page, "www.pjhwebservices.co.uk", contentRight, y - 38, bodySize, font);
@@ -145,7 +142,7 @@ export async function generateQuotePDF(row) {
     font
   );
 
-  // Customer box
+  // Customer Box
   const blockW = 270;
   const blockH = 130;
   const blockX = width - margin - blockW;
@@ -186,41 +183,37 @@ export async function generateQuotePDF(row) {
     drawText(page, email, blockX + 10, yBlock, bodySize, font);
     yBlock -= 12;
   }
-  if (phone) {
-    drawText(page, phone, blockX + 10, yBlock, bodySize, font);
-  }
+  if (phone) drawText(page, phone, blockX + 10, yBlock, bodySize, font);
 
+  // ---------------------------------------------------------------------------
+  // Project + Description
+  // ---------------------------------------------------------------------------
   y = blockY - 30;
   drawText(page, "Project:", margin, y, h2, bold);
   drawText(page, String(row.title || "-"), margin + 70, y, bodySize, font);
   y -= 16;
 
-  // Description
   const descLines = wrapByWidth(String(row.description || "-"), width - margin * 2, font, bodySize);
   for (const line of descLines) {
-    if (y < minBottomY) {
-      drawFooter(page, font);
-      page = pdfDoc.addPage(A4);
-      y = height - 80;
-    }
     drawText(page, line, margin, y, bodySize, font);
     y -= 12;
   }
   y -= 8;
 
   // ---------------------------------------------------------------------------
-  // ITEMS TABLE
+  // ITEMS TABLE (Fixed column alignment)
   // ---------------------------------------------------------------------------
   const tableLeft = margin;
   const tableWidth = width - margin * 2;
-  const colWidths = [250, 60, 80, 60, 70]; // + discount column
   const colPad = 8;
+
+  // total available width = 495
+  const colWidths = [285, 60, 80, 70]; // description, qty, unit, total
   const colX = [
     tableLeft,
     tableLeft + colWidths[0],
     tableLeft + colWidths[0] + colWidths[1],
     tableLeft + colWidths[0] + colWidths[1] + colWidths[2],
-    tableLeft + colWidths[0] + colWidths[1] + colWidths[2] + colWidths[3],
   ];
 
   const drawTableHeader = () => {
@@ -236,21 +229,8 @@ export async function generateQuotePDF(row) {
     drawText(page, "Description", colX[0] + colPad, y - 16, bodySize, bold, white);
     drawRightText(page, "Qty", colX[1] + colWidths[1] - colPad, y - 16, bodySize, bold, white);
     drawRightText(page, "Unit (£)", colX[2] + colWidths[2] - colPad, y - 16, bodySize, bold, white);
-    drawRightText(page, "Disc %", colX[3] + colWidths[3] - colPad, y - 16, bodySize, bold, white);
-    drawRightText(page, "Total (£)", colX[4] + colWidths[4] - colPad, y - 16, bodySize, bold, white);
+    drawRightText(page, "Total (£)", colX[3] + colWidths[3] - colPad, y - 16, bodySize, bold, white);
     y -= headerH;
-  };
-
-  const ensureSpace = (needed) => {
-    if (y - needed < minBottomY) {
-      drawFooter(page, font);
-      page = pdfDoc.addPage(A4);
-      y = height - 80;
-      page.drawRectangle({ x: 0, y: height - 70, width, height: 40, color: BRAND_BLUE });
-      drawText(page, "Quote Items (continued)", margin, height - 55, h2, bold, rgb(1, 1, 1));
-      y -= 90;
-      drawTableHeader();
-    }
   };
 
   drawTableHeader();
@@ -266,16 +246,13 @@ export async function generateQuotePDF(row) {
   for (const it of items) {
     const qty = numberOrZero(it.qty || 1);
     const unit = numberOrZero(it.unit_price ?? it.price ?? 0);
-    const disc = Math.min(Math.max(numberOrZero(it.discount_percent || 0), 0), 100);
     const gross = qty * unit;
-    const net = gross * (1 - disc / 100);
-    subtotal += net;
+    const disc = Math.min(Math.max(numberOrZero(it.discount_percent || 0), 0), 100);
+    const total = gross * (1 - disc / 100);
+    subtotal += total;
 
     const descLines = wrapByWidth(it.name || "-", colWidths[0] - colPad * 2, font, bodySize);
-    const lineHeight = 13;
-    const rowHeight = Math.max(20, descLines.length * lineHeight + 6);
-
-    ensureSpace(rowHeight);
+    const rowHeight = Math.max(20, descLines.length * 13 + 6);
 
     page.drawRectangle({
       x: tableLeft,
@@ -290,13 +267,12 @@ export async function generateQuotePDF(row) {
     let yy = y - 14;
     for (const line of descLines) {
       drawText(page, line, colX[0] + colPad, yy, bodySize, font);
-      yy -= lineHeight;
+      yy -= 13;
     }
 
     drawRightText(page, qty, colX[1] + colWidths[1] - colPad, y - 14, bodySize, font);
     drawRightText(page, unit.toFixed(2), colX[2] + colWidths[2] - colPad, y - 14, bodySize, font);
-    drawRightText(page, disc.toFixed(1), colX[3] + colWidths[3] - colPad, y - 14, bodySize, font);
-    drawRightText(page, net.toFixed(2), colX[4] + colWidths[4] - colPad, y - 14, bodySize, font);
+    drawRightText(page, total.toFixed(2), colX[3] + colWidths[3] - colPad, y - 14, bodySize, font);
 
     y -= rowHeight;
   }
@@ -310,8 +286,6 @@ export async function generateQuotePDF(row) {
   const balance = Math.max(afterGlobal - deposit, 0);
 
   y -= 24;
-  ensureSpace(80);
-
   const totalsBoxW = 260;
   const totalsBoxX = contentRight - totalsBoxW;
   const totalsBoxY = y - 70;
@@ -341,7 +315,6 @@ export async function generateQuotePDF(row) {
   y = totalsBoxY - 30;
   drawText(page, "Thank you for your business!", margin, y, bodySize + 1, bold, BRAND_BLUE);
 
-  // Footer
   drawFooter(page, font);
 
   // ---------------------------------------------------------------------------
@@ -383,7 +356,7 @@ export async function generateQuotePDF(row) {
   drawFooter(termsPage, font);
 
   // ---------------------------------------------------------------------------
-  // SAVE PDF
+  // SAVE
   // ---------------------------------------------------------------------------
   const outDir = path.resolve(process.cwd(), "generated", "quotes");
   fs.mkdirSync(outDir, { recursive: true });
@@ -398,9 +371,7 @@ export async function generateQuotePDF(row) {
   console.log(`📄 Quote PDF saved: ${outPath}`);
   return outPath;
 
-  // ---------------------------------------------------------------------------
-  // FOOTER
-  // ---------------------------------------------------------------------------
+  // Footer
   function drawFooter(p, fnt) {
     drawLine(p, margin, footerY, A4[0] - margin, footerY, 2, BRAND_BLUE);
     drawText(
