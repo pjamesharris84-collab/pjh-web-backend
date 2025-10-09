@@ -26,16 +26,21 @@ dotenv.config();
 const app = express();
 
 /* ============================================================
-   🌍 Dynamic CORS Configuration
+   🌍 CORS Configuration (Local + Live)
 ============================================================ */
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
+const defaultOrigins = [
+  "http://localhost:5173",
+  "https://pjhwebservices.co.uk",
+  "https://www.pjhwebservices.co.uk",
+];
 
-if (!allowedOrigins.includes("http://localhost:5173")) {
-  allowedOrigins.push("http://localhost:5173"); // Always allow local dev
-}
+const allowedOrigins = (
+  process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
+    : []
+)
+  .filter(Boolean)
+  .concat(defaultOrigins.filter((o) => !process.env.ALLOWED_ORIGINS?.includes(o)));
 
 app.use(
   cors({
@@ -49,7 +54,7 @@ app.use(
   })
 );
 
-// Handle preflight requests manually
+// ✅ Handle preflight (OPTIONS) requests
 app.options("*", (req, res) => {
   res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.header(
@@ -71,20 +76,21 @@ console.table({
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? "✅" : "❌",
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET ? "✅" : "❌",
   DATABASE_URL: process.env.DATABASE_URL ? "✅" : "❌",
+  FRONTEND_URL:
+    process.env.FRONTEND_URL ||
+    "https://www.pjhwebservices.co.uk",
 });
 
 /* ============================================================
-   ⚙️ Middleware — Stripe webhook first (RAW body!)
+   ⚙️ Stripe Webhook (must run BEFORE express.json)
 ============================================================ */
-
-// ⚠️ Webhook MUST be registered BEFORE express.json()
 app.post(
   "/api/payments/webhook",
   express.raw({ type: "application/json" }),
   paymentsWebhook
 );
 
-// All other routes parse JSON normally
+// All other routes use normal JSON parsing
 app.use(express.json());
 
 /* ============================================================
@@ -133,14 +139,30 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
-app.use("/api/orders", orderDiaryRoutes);
 app.use("/api/packages", packagesRouter);
 
-// ✅ Dual-Mount Quotes
+// ✅ Dedicated Order Diary
+app.use("/api/diary", orderDiaryRoutes);
+
+// ✅ Dual-Mount Quotes (Customer/Admin)
 app.use("/api/customers", quotesCustomerRouter);
 app.use("/api/quotes", quotesAdminRouter);
 
-// ✅ Serve static files (for images, PDFs, etc.)
+/* ============================================================
+   🩹 Stub for /api/payments/schedule/:id
+   (prevents 404s until recurring billing logic added)
+============================================================ */
+app.get("/api/payments/schedule/:id", (req, res) => {
+  res.json({
+    success: true,
+    schedule: [],
+    message: "No recurring schedule available for this order yet.",
+  });
+});
+
+/* ============================================================
+   🖼️ Static File Serving (PDFs, logos, etc.)
+============================================================ */
 app.use(express.static("public"));
 
 /* ============================================================
@@ -157,5 +179,6 @@ app.get("/", (req, res) => {
 ============================================================ */
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Backend running at: http://localhost:${PORT}`);
+  console.log(`🚀 Backend running on port: ${PORT}`);
+  console.log("🌍 Allowed Origins:", allowedOrigins);
 });
