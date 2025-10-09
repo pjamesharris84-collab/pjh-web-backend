@@ -1,12 +1,13 @@
 /**
  * ============================================================
- * PJH Web Services — Orders & Invoicing API (2025 Unified)
+ * PJH Web Services — Orders & Invoicing API (2025 Unified Final)
  * ============================================================
  * Handles:
- *  ✅ Order lifecycle and quote conversion
- *  ✅ Stripe payment & Direct Debit integration
- *  ✅ Invoice generation + email delivery
- *  ✅ Payment history + reconciliation display
+ *  ✅ Order lifecycle & quote conversion
+ *  ✅ Stripe & manual payments
+ *  ✅ Direct Debit integration
+ *  ✅ Invoice PDF generation + email delivery
+ *  ✅ Payment reconciliation & order refresh
  * ============================================================
  */
 
@@ -33,7 +34,8 @@ const FRONTEND_URL =
     : "https://www.pjhwebservices.co.uk");
 
 /* ============================================================
-   🧱 FETCH ALL ORDERS
+   🧱 GET /api/orders
+   Fetch all orders with customer info
 ============================================================ */
 router.get("/", async (_req, res) => {
   try {
@@ -57,11 +59,12 @@ router.get("/", async (_req, res) => {
 });
 
 /* ============================================================
-   🔍 FETCH SINGLE ORDER + PAYMENT STATUS
+   🔍 GET /api/orders/:id
+   Fetch single order + payment summary
 ============================================================ */
 router.get("/:id", async (req, res) => {
+  const { id } = req.params;
   try {
-    const { id } = req.params;
     const { rows } = await pool.query(
       `
       SELECT 
@@ -83,12 +86,14 @@ router.get("/:id", async (req, res) => {
       return res.status(404).json({ success: false, error: "Order not found." });
 
     const order = rows[0];
-
-    // Get all payments for this order
     const { rows: payments } = await pool.query(
-      `SELECT * FROM payments WHERE order_id = $1 ORDER BY created_at ASC`,
+      "SELECT * FROM payments WHERE order_id=$1 ORDER BY created_at ASC",
       [id]
     );
+
+    const totalPaid = payments
+      .filter((p) => p.status === "paid")
+      .reduce((sum, p) => sum + Number(p.amount), 0);
 
     const depositPayment = payments.find((p) => p.type === "deposit");
     const balancePayment = payments.find((p) => p.type === "balance");
@@ -100,6 +105,11 @@ router.get("/:id", async (req, res) => {
         payments,
         deposit_payment: depositPayment || null,
         balance_payment: balancePayment || null,
+        total_paid: totalPaid,
+        balance_due:
+          Number(order.deposit || 0) +
+          Number(order.balance || 0) -
+          Number(totalPaid || 0),
       },
     });
   } catch (err) {
@@ -109,14 +119,15 @@ router.get("/:id", async (req, res) => {
 });
 
 /* ============================================================
-   🪄 CREATE ORDER FROM QUOTE
+   🪄 POST /api/orders/from-quote/:quoteId
+   Create an order from an approved quote
 ============================================================ */
 router.post("/from-quote/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
   try {
-    // Avoid duplicates
+    // Prevent duplicates
     const existing = await pool.query(
-      "SELECT * FROM orders WHERE quote_id = $1 LIMIT 1",
+      "SELECT * FROM orders WHERE quote_id=$1 LIMIT 1",
       [quoteId]
     );
     if (existing.rows.length)
@@ -126,8 +137,7 @@ router.post("/from-quote/:quoteId", async (req, res) => {
         data: existing.rows[0],
       });
 
-    // Load quote
-    const quoteRes = await pool.query("SELECT * FROM quotes WHERE id = $1", [
+    const quoteRes = await pool.query("SELECT * FROM quotes WHERE id=$1", [
       quoteId,
     ]);
     if (!quoteRes.rows.length)
@@ -139,7 +149,8 @@ router.post("/from-quote/:quoteId", async (req, res) => {
       : JSON.parse(quote.items || "[]");
 
     const total = items.reduce(
-      (sum, i) => sum + Number(i.qty ?? 1) * Number(i.unit_price ?? i.price ?? 0),
+      (sum, i) =>
+        sum + Number(i.qty ?? 1) * Number(i.unit_price ?? i.price ?? 0),
       0
     );
     const deposit = Number(quote.deposit ?? total * 0.5);
@@ -177,7 +188,8 @@ router.post("/from-quote/:quoteId", async (req, res) => {
 });
 
 /* ============================================================
-   💳 GENERATE STRIPE PAYMENT LINK (DEPOSIT/BALANCE)
+   💳 POST /api/orders/:id/payment-link/:type
+   Create & email Stripe Checkout link
 ============================================================ */
 router.post("/:id/payment-link/:type", async (req, res) => {
   const { id, type } = req.params;
@@ -189,7 +201,7 @@ router.post("/:id/payment-link/:type", async (req, res) => {
       `
       SELECT o.*, c.name, c.email
       FROM orders o
-      JOIN customers c ON o.customer_id = c.id
+      JOIN customers c ON o.customer_id=c.id
       WHERE o.id=$1;
       `,
       [id]
@@ -201,13 +213,11 @@ router.post("/:id/payment-link/:type", async (req, res) => {
     const order = rows[0];
     const amount =
       type === "deposit" ? Number(order.deposit) : Number(order.balance);
-
     if (amount <= 0)
       return res
         .status(400)
         .json({ success: false, error: "No outstanding amount." });
 
-    // Create Stripe Checkout
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -230,7 +240,7 @@ router.post("/:id/payment-link/:type", async (req, res) => {
         customer_id: order.customer_id,
         payment_type: type,
       },
-      success_url: `${FRONTEND_URL}/payment-success?order=${id}`,
+      success_url: `${FRONTEND_URL}/payment-success?order=${id}&type=${type}`,
       cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${id}`,
       customer_email: order.email,
     });
@@ -259,7 +269,8 @@ router.post("/:id/payment-link/:type", async (req, res) => {
 });
 
 /* ============================================================
-   💰 RECORD MANUAL PAYMENT
+   💰 POST /api/orders/:id/payments
+   Record manual payment
 ============================================================ */
 router.post("/:id/payments", async (req, res) => {
   const { id } = req.params;
@@ -271,8 +282,10 @@ router.post("/:id/payments", async (req, res) => {
       return res.status(404).json({ success: false, error: "Order not found." });
 
     await pool.query(
-      `INSERT INTO payments (order_id, amount, type, method, reference, status)
-       VALUES ($1,$2,$3,$4,$5,'paid')`,
+      `
+      INSERT INTO payments (order_id, amount, type, method, reference, status)
+      VALUES ($1,$2,$3,$4,$5,'paid');
+      `,
       [id, amount, type, method, reference]
     );
 
@@ -283,11 +296,14 @@ router.post("/:id/payments", async (req, res) => {
         ? "balance_paid"
         : null;
 
-    if (flag)
+    if (flag) {
       await pool.query(
-        `UPDATE orders SET total_paid = COALESCE(total_paid,0) + $1, ${flag}=TRUE WHERE id=$2`,
+        `UPDATE orders 
+         SET total_paid = COALESCE(total_paid,0) + $1, ${flag}=TRUE 
+         WHERE id=$2`,
         [amount, id]
       );
+    }
 
     res.json({ success: true, message: "Payment recorded successfully." });
   } catch (err) {
@@ -297,11 +313,12 @@ router.post("/:id/payments", async (req, res) => {
 });
 
 /* ============================================================
-   📜 GET ALL PAYMENTS FOR ORDER
+   📜 GET /api/orders/:id/payments
+   Fetch all payments for an order
 ============================================================ */
 router.get("/:id/payments", async (req, res) => {
+  const { id } = req.params;
   try {
-    const { id } = req.params;
     const { rows } = await pool.query(
       "SELECT * FROM payments WHERE order_id=$1 ORDER BY created_at ASC",
       [id]
@@ -319,7 +336,8 @@ router.get("/:id/payments", async (req, res) => {
 });
 
 /* ============================================================
-   🧾 GENERATE + SEND INVOICE (PDF)
+   🧾 POST /api/orders/:id/invoice/:type
+   Generate + email invoice PDF
 ============================================================ */
 router.post("/:id/invoice/:type", async (req, res) => {
   const { id, type } = req.params;
@@ -333,7 +351,7 @@ router.post("/:id/invoice/:type", async (req, res) => {
       SELECT o.*, c.*
       FROM orders o
       JOIN customers c ON o.customer_id = c.id
-      WHERE o.id = $1;
+      WHERE o.id=$1;
       `,
       [id]
     );
@@ -342,7 +360,20 @@ router.post("/:id/invoice/:type", async (req, res) => {
       return res.status(404).json({ success: false, error: "Order not found." });
 
     const order = rows[0];
-    const pdfPath = await generateInvoicePDF(order, invoiceType);
+
+    // Get accurate totals
+    const { rows: payments } = await pool.query(
+      `SELECT * FROM payments WHERE order_id=$1 AND status='paid'`,
+      [id]
+    );
+    const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
+    const subtotal = Number(order.deposit || 0) + Number(order.balance || 0);
+    const balanceDue = Math.max(subtotal - totalPaid, 0);
+
+    const pdfPath = await generateInvoicePDF(
+      { ...order, total_paid: totalPaid, balance_due: balanceDue },
+      invoiceType
+    );
 
     await sendEmail({
       to: order.email,
@@ -370,7 +401,57 @@ router.post("/:id/invoice/:type", async (req, res) => {
     });
   } catch (err) {
     console.error(`❌ Error sending ${type} invoice:`, err);
-    res.status(500).json({ success: false, error: `Failed to send ${type} invoice.` });
+    res.status(500).json({
+      success: false,
+      error: `Failed to send ${type} invoice.`,
+    });
+  }
+});
+
+/* ============================================================
+   🔁 GET /api/orders/:id/refresh
+   Refresh order totals (after Stripe webhook success)
+============================================================ */
+router.get("/:id/refresh", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT 
+        o.*, 
+        c.business AS customer_business,
+        c.name     AS customer_name,
+        c.email    AS customer_email,
+        c.phone    AS customer_phone,
+        c.address1, c.address2, c.city, c.county, c.postcode,
+        c.direct_debit_active
+      FROM orders o
+      JOIN customers c ON o.customer_id=c.id
+      WHERE o.id=$1;
+      `,
+      [id]
+    );
+
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: "Order not found." });
+
+    const order = rows[0];
+    const { rows: payments } = await pool.query(
+      "SELECT * FROM payments WHERE order_id=$1 ORDER BY created_at DESC",
+      [id]
+    );
+
+    const totalPaid = payments
+      .filter((p) => p.status === "paid")
+      .reduce((sum, p) => sum + Number(p.amount), 0);
+
+    res.json({
+      success: true,
+      data: { ...order, payments, total_paid: totalPaid },
+    });
+  } catch (err) {
+    console.error("❌ Error refreshing order:", err);
+    res.status(500).json({ success: false, error: "Failed to refresh order." });
   }
 });
 
