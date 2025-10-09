@@ -1,6 +1,13 @@
 // ============================================================
 // PJH Web Services — Server Startup File (Unified Billing Ready)
 // ============================================================
+// Handles:
+//  ✅ Express core + database migrations
+//  ✅ Secure CORS for local, Vercel, and live
+//  ✅ Stripe webhook signature-safe handling
+//  ✅ Static file delivery for PDFs/logos
+//  ✅ Email-powered contact form
+// ============================================================
 
 import express from "express";
 import cors from "cors";
@@ -47,7 +54,7 @@ const allowedOrigins = (
 app.use(
   cors({
     origin: (origin, callback) => {
-      // ✅ Allow localhost, live domains, and any .vercel.app preview
+      // ✅ Allow localhost, production domains, and Vercel preview URLs
       if (
         !origin ||
         allowedOrigins.includes(origin) ||
@@ -63,7 +70,7 @@ app.use(
   })
 );
 
-// ✅ Handle preflight (OPTIONS) requests
+// ✅ Handle preflight (OPTIONS) requests globally
 app.options("*", (req, res) => {
   res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.header(
@@ -74,6 +81,15 @@ app.options("*", (req, res) => {
   res.header("Access-Control-Allow-Credentials", "true");
   res.sendStatus(200);
 });
+
+/* ============================================================
+   ⚙️ Stripe Webhook — must be BEFORE express.json()
+============================================================ */
+app.post(
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
+  paymentsWebhook
+);
 
 /* ============================================================
    🧠 Environment Summary
@@ -90,15 +106,8 @@ console.table({
 });
 
 /* ============================================================
-   ⚙️ Stripe Webhook (must run BEFORE express.json)
+   🧱 Enable JSON Parsing (after webhook route)
 ============================================================ */
-app.post(
-  "/api/payments/webhook",
-  express.raw({ type: "application/json" }),
-  paymentsWebhook
-);
-
-// All other routes use normal JSON parsing
 app.use(express.json());
 
 /* ============================================================
@@ -111,6 +120,7 @@ await runMigrations();
 ============================================================ */
 app.post("/api/contact", async (req, res) => {
   const { name, email, phone, message } = req.body;
+
   if (!name || !email || !phone || !message) {
     return res
       .status(400)
@@ -136,7 +146,6 @@ app.post("/api/contact", async (req, res) => {
 /* ============================================================
    📦 API Routes
 ============================================================ */
-
 // ✅ Unified Stripe Billing System
 app.use("/api/payments", paymentsRouter);
 
@@ -158,7 +167,6 @@ app.use("/api/quotes", quotesAdminRouter);
 
 /* ============================================================
    🩹 Stub for /api/payments/schedule/:id
-   (prevents 404s until recurring billing logic added)
 ============================================================ */
 app.get("/api/payments/schedule/:id", (req, res) => {
   res.json({
@@ -171,7 +179,14 @@ app.get("/api/payments/schedule/:id", (req, res) => {
 /* ============================================================
    🖼️ Static File Serving (PDFs, logos, etc.)
 ============================================================ */
-app.use(express.static("public"));
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const publicPath = path.join(__dirname, "public");
+app.use(express.static(publicPath));
 
 /* ============================================================
    🌐 Health Check Endpoint

@@ -16,6 +16,7 @@
 import express from "express";
 import fs from "fs";
 import path from "path";
+import { fileURLToPath } from "url";
 import pool from "../db.js";
 import dotenv from "dotenv";
 import Stripe from "stripe";
@@ -36,19 +37,19 @@ const FRONTEND_URL =
     ? "http://localhost:5173"
     : "https://www.pjhwebservices.co.uk");
 
+// Path setup (for Render-safe file resolution)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 /* ============================================================
    🧱 GET /api/orders
-   Fetch all orders with customer info
 ============================================================ */
 router.get("/", async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT 
-        o.*,
-        c.business AS customer_business,
-        c.name     AS customer_name,
-        c.email    AS customer_email,
-        c.phone    AS customer_phone,
+        o.*, c.business AS customer_business, c.name AS customer_name,
+        c.email AS customer_email, c.phone AS customer_phone,
         c.address1, c.address2, c.city, c.county, c.postcode
       FROM orders o
       JOIN customers c ON o.customer_id = c.id
@@ -63,7 +64,6 @@ router.get("/", async (_req, res) => {
 
 /* ============================================================
    🔍 GET /api/orders/:id
-   Fetch single order + payment summary
 ============================================================ */
 router.get("/:id", async (req, res) => {
   const { id } = req.params;
@@ -71,11 +71,8 @@ router.get("/:id", async (req, res) => {
     const { rows } = await pool.query(
       `
       SELECT 
-        o.*,
-        c.business AS customer_business,
-        c.name     AS customer_name,
-        c.email    AS customer_email,
-        c.phone    AS customer_phone,
+        o.*, c.business AS customer_business, c.name AS customer_name,
+        c.email AS customer_email, c.phone AS customer_phone,
         c.address1, c.address2, c.city, c.county, c.postcode,
         c.direct_debit_active
       FROM orders o
@@ -98,16 +95,11 @@ router.get("/:id", async (req, res) => {
       .filter((p) => p.status === "paid")
       .reduce((sum, p) => sum + Number(p.amount), 0);
 
-    const depositPayment = payments.find((p) => p.type === "deposit");
-    const balancePayment = payments.find((p) => p.type === "balance");
-
     res.json({
       success: true,
       data: {
         ...order,
         payments,
-        deposit_payment: depositPayment || null,
-        balance_payment: balancePayment || null,
         total_paid: totalPaid,
         balance_due:
           Number(order.deposit || 0) +
@@ -123,7 +115,6 @@ router.get("/:id", async (req, res) => {
 
 /* ============================================================
    🪄 POST /api/orders/from-quote/:quoteId
-   Create an order from an approved quote
 ============================================================ */
 router.post("/from-quote/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
@@ -191,7 +182,6 @@ router.post("/from-quote/:quoteId", async (req, res) => {
 
 /* ============================================================
    💳 POST /api/orders/:id/payment-link/:type
-   Create & email Stripe Checkout link
 ============================================================ */
 router.post("/:id/payment-link/:type", async (req, res) => {
   const { id, type } = req.params;
@@ -272,7 +262,6 @@ router.post("/:id/payment-link/:type", async (req, res) => {
 
 /* ============================================================
    💰 POST /api/orders/:id/payments
-   Record manual payment
 ============================================================ */
 router.post("/:id/payments", async (req, res) => {
   const { id } = req.params;
@@ -315,29 +304,6 @@ router.post("/:id/payments", async (req, res) => {
 });
 
 /* ============================================================
-   📜 GET /api/orders/:id/payments
-   Fetch all payments for an order
-============================================================ */
-router.get("/:id/payments", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const { rows } = await pool.query(
-      "SELECT * FROM payments WHERE order_id=$1 ORDER BY created_at ASC",
-      [id]
-    );
-
-    const paid = rows
-      .filter((r) => r.status === "paid")
-      .reduce((sum, p) => sum + Number(p.amount), 0);
-
-    res.json({ success: true, payments: rows, total_paid: paid });
-  } catch (err) {
-    console.error("❌ Error fetching payments:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch payments." });
-  }
-});
-
-/* ============================================================
    🧾 POST /api/orders/:id/invoice/:type
    Generate + email invoice PDF
 ============================================================ */
@@ -349,15 +315,9 @@ router.post("/:id/invoice/:type", async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      `
-      SELECT o.*, c.*
-      FROM orders o
-      JOIN customers c ON o.customer_id = c.id
-      WHERE o.id=$1;
-      `,
+      `SELECT o.*, c.* FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id=$1;`,
       [id]
     );
-
     if (!rows.length)
       return res.status(404).json({ success: false, error: "Order not found." });
 
@@ -371,13 +331,15 @@ router.post("/:id/invoice/:type", async (req, res) => {
     const subtotal = Number(order.deposit || 0) + Number(order.balance || 0);
     const balanceDue = Math.max(subtotal - totalPaid, 0);
 
-    // ✅ Dynamic filename
     const filename = `PJH-INV-${order.id}-${invoiceType}.pdf`;
     const pdfPath = await generateInvoicePDF(
       { ...order, total_paid: totalPaid, balance_due: balanceDue },
       invoiceType,
       filename
     );
+
+    const resolvedPath = path.resolve(pdfPath);
+    console.log(`📄 Invoice saved to: ${resolvedPath}`);
 
     await sendEmail({
       to: order.email,
@@ -392,29 +354,22 @@ router.post("/:id/invoice/:type", async (req, res) => {
             : Number(order.balance),
         link: `${FRONTEND_URL}/pay?order=${order.id}&type=${invoiceType}`,
       }),
-      attachments: [{ filename, path: pdfPath }],
+      attachments: [{ filename, path: resolvedPath }],
     });
 
     const flag =
       invoiceType === "deposit" ? "deposit_invoiced" : "balance_invoiced";
     await pool.query(`UPDATE orders SET ${flag}=TRUE WHERE id=$1`, [id]);
 
-    res.json({
-      success: true,
-      message: `${invoiceType} invoice emailed successfully.`,
-    });
+    res.json({ success: true, message: `${invoiceType} invoice emailed successfully.` });
   } catch (err) {
     console.error(`❌ Error sending ${type} invoice:`, err);
-    res.status(500).json({
-      success: false,
-      error: `Failed to send ${type} invoice.`,
-    });
+    res.status(500).json({ success: false, error: `Failed to send ${type} invoice.` });
   }
 });
 
 /* ============================================================
-   👀 GET /api/orders/:id/invoice/:type
-   Preview invoice PDF (no email)
+   👀 GET /api/orders/:id/invoice/:type — Preview
 ============================================================ */
 router.get("/:id/invoice/:type", async (req, res) => {
   const { id, type } = req.params;
@@ -425,35 +380,43 @@ router.get("/:id/invoice/:type", async (req, res) => {
   }
 
   try {
-    const { rows } = await pool.query(`
-      SELECT o.*, c.*
-      FROM orders o
-      JOIN customers c ON o.customer_id = c.id
-      WHERE o.id = $1
-    `, [id]);
-
+    const { rows } = await pool.query(
+      `SELECT o.*, c.* FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id=$1`,
+      [id]
+    );
     if (!rows.length)
       return res.status(404).json({ success: false, error: "Order not found." });
 
     const order = rows[0];
+    const filename = `PJH-INV-${order.id}-${invoiceType}.pdf`;
+
+    const pdfPath = path.resolve(
+      path.join(process.cwd(), "public", "invoices", filename)
+    );
+
+    if (fs.existsSync(pdfPath)) {
+      res.setHeader("Content-Type", "application/pdf");
+      return res.sendFile(pdfPath);
+    }
+
+    // If not found, regenerate
     const { rows: payments } = await pool.query(
       `SELECT * FROM payments WHERE order_id=$1 AND status='paid'`,
       [id]
     );
-
     const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
     const subtotal = Number(order.deposit || 0) + Number(order.balance || 0);
     const balanceDue = Math.max(subtotal - totalPaid, 0);
 
-    const filename = `PJH-INV-${order.id}-${invoiceType}.pdf`;
-    const pdfPath = await generateInvoicePDF(
+    const regenerated = await generateInvoicePDF(
       { ...order, total_paid: totalPaid, balance_due: balanceDue },
       invoiceType,
       filename
     );
 
+    console.log(`📄 Regenerated missing invoice: ${regenerated}`);
     res.setHeader("Content-Type", "application/pdf");
-    res.sendFile(pdfPath, { root: process.cwd() });
+    res.sendFile(regenerated);
   } catch (err) {
     console.error(`❌ Error generating preview (${invoiceType}):`, err);
     res.status(500).json({ success: false, error: "Failed to generate preview." });
@@ -462,21 +425,16 @@ router.get("/:id/invoice/:type", async (req, res) => {
 
 /* ============================================================
    🔁 GET /api/orders/:id/refresh
-   Refresh order totals (after Stripe webhook success)
 ============================================================ */
 router.get("/:id/refresh", async (req, res) => {
   const { id } = req.params;
   try {
     const { rows } = await pool.query(
       `
-      SELECT 
-        o.*, 
-        c.business AS customer_business,
-        c.name     AS customer_name,
-        c.email    AS customer_email,
-        c.phone    AS customer_phone,
-        c.address1, c.address2, c.city, c.county, c.postcode,
-        c.direct_debit_active
+      SELECT o.*, c.business AS customer_business, c.name AS customer_name,
+             c.email AS customer_email, c.phone AS customer_phone,
+             c.address1, c.address2, c.city, c.county, c.postcode,
+             c.direct_debit_active
       FROM orders o
       JOIN customers c ON o.customer_id=c.id
       WHERE o.id=$1;
@@ -497,10 +455,7 @@ router.get("/:id/refresh", async (req, res) => {
       .filter((p) => p.status === "paid")
       .reduce((sum, p) => sum + Number(p.amount), 0);
 
-    res.json({
-      success: true,
-      data: { ...order, payments, total_paid: totalPaid },
-    });
+    res.json({ success: true, data: { ...order, payments, total_paid: totalPaid } });
   } catch (err) {
     console.error("❌ Error refreshing order:", err);
     res.status(500).json({ success: false, error: "Failed to refresh order." });
