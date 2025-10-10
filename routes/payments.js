@@ -8,6 +8,7 @@
  *  ✅ Webhook-based reconciliation to orders/payments
  *  ✅ Safe retry logic (no double increments)
  *  ✅ Off-session recurring billing
+ *  ✅ Refund endpoint (Stripe + manual)
  * ============================================================
  */
 
@@ -33,7 +34,7 @@ const FRONTEND_URL =
     : "https://www.pjhwebservices.co.uk");
 
 /* ------------------------------------------------------------
-   Helper: getAlreadyPaid
+   Helpers
 ------------------------------------------------------------ */
 async function getAlreadyPaid(orderId, type) {
   const { rows } = await pool.query(
@@ -48,9 +49,6 @@ async function getAlreadyPaid(orderId, type) {
   return Number(rows[0]?.paid || 0);
 }
 
-/* ------------------------------------------------------------
-   Helper: ensureStripeCustomer
------------------------------------------------------------- */
 async function ensureStripeCustomer(customer) {
   if (customer.stripe_customer_id) return customer.stripe_customer_id;
 
@@ -79,13 +77,11 @@ async function ensureStripeCustomer(customer) {
 router.post("/create-checkout", async (req, res) => {
   try {
     const { orderId, flow, type } = req.body;
-
     if (!orderId)
       return res.status(400).json({ success: false, error: "Missing orderId" });
     if (!["card_payment", "bacs_payment", "bacs_setup"].includes(flow))
       return res.status(400).json({ success: false, error: "Invalid flow" });
 
-    // Load order + customer
     const { rows } = await pool.query(
       `
       SELECT o.*, c.id AS cid, c.name AS customer_name, c.email,
@@ -112,10 +108,9 @@ router.post("/create-checkout", async (req, res) => {
       const alreadyPaid = await getAlreadyPaid(order.id, type);
       amount = Math.max(baseAmount - alreadyPaid, 0);
       if (amount <= 0)
-        return res.status(400).json({
-          success: false,
-          error: `No outstanding ${type} amount (already settled)`,
-        });
+        return res
+          .status(400)
+          .json({ success: false, error: `No outstanding ${type} amount` });
       lineName = `${type === "deposit" ? "Deposit" : "Balance"} — ${order.title}`;
     }
 
@@ -214,19 +209,16 @@ export async function paymentsWebhook(req, res) {
   }
 
   const obj = event.data.object;
-
   try {
     switch (event.type) {
       case "checkout.session.completed": {
         const s = obj;
         if (s.mode === "setup") {
           const si = await stripe.setupIntents.retrieve(s.setup_intent);
-          let mandateId =
-            si.mandate ||
-            (si.payment_method &&
-              (await stripe.paymentMethods.retrieve(si.payment_method))
-                ?.bacs_debit?.mandate) ||
-            null;
+          const pm =
+            si.payment_method &&
+            (await stripe.paymentMethods.retrieve(si.payment_method));
+          const mandateId = si.mandate || pm?.bacs_debit?.mandate || null;
           if (mandateId) {
             await pool.query(
               `UPDATE customers
@@ -234,7 +226,7 @@ export async function paymentsWebhook(req, res) {
                WHERE stripe_customer_id=$2`,
               [mandateId, s.customer]
             );
-            console.log(`✅ Mandate stored ${mandateId}`);
+            console.log(`✅ Mandate stored: ${mandateId}`);
           }
         }
 
@@ -246,7 +238,6 @@ export async function paymentsWebhook(req, res) {
           const method = (s.payment_method_types || [])[0] || "card";
 
           if (orderId && amount > 0) {
-            // Upsert payment record
             await pool.query(
               `INSERT INTO payments
                  (stripe_event_id, order_id, customer_id, amount, type, method, reference, stripe_status, status)
@@ -255,7 +246,6 @@ export async function paymentsWebhook(req, res) {
               [event.id, orderId, customerId, amount, payType, method, s.payment_intent || s.id, s.payment_status]
             );
 
-            // 🔁 Recalculate total_paid fresh from DB
             const { rows } = await pool.query(
               `SELECT COALESCE(SUM(amount),0)::numeric AS paid
                FROM payments WHERE order_id=$1 AND status='paid'`,
@@ -269,13 +259,11 @@ export async function paymentsWebhook(req, res) {
                 : payType === "balance"
                 ? "balance_paid"
                 : null;
-
             const q = flag
               ? `UPDATE orders SET ${flag}=TRUE, total_paid=$1, updated_at=NOW() WHERE id=$2`
               : `UPDATE orders SET total_paid=$1, updated_at=NOW() WHERE id=$2`;
-
             await pool.query(q, [totalPaid, orderId]);
-            console.log(`💰 Order ${orderId} reconciled — paid £${amount}`);
+            console.log(`💰 Reconciled order ${orderId} — £${amount}`);
           }
         }
         break;
@@ -311,13 +299,11 @@ export async function paymentsWebhook(req, res) {
               : payType === "balance"
               ? "balance_paid"
               : null;
-
           const q = flag
             ? `UPDATE orders SET ${flag}=TRUE, total_paid=$1, updated_at=NOW() WHERE id=$2`
             : `UPDATE orders SET total_paid=$1, updated_at=NOW() WHERE id=$2`;
-
           await pool.query(q, [totalPaid, orderId]);
-          console.log(`💰 PaymentIntent success: order ${orderId} now £${totalPaid} paid`);
+          console.log(`💰 PaymentIntent success — order ${orderId} now £${totalPaid} paid`);
         }
         break;
       }
@@ -326,7 +312,7 @@ export async function paymentsWebhook(req, res) {
         const pi = obj;
         const orderId = Number(pi.metadata?.order_id || 0);
         await pool.query(
-          `UPDATE payments SET status='failed', stripe_status=$2 WHERE stripe_payment_intent=$1`,
+          `UPDATE payments SET status='failed', stripe_status=$2 WHERE reference=$1`,
           [pi.id, pi.status]
         );
         console.warn(`⚠️ Payment failed for order ${orderId}`);
@@ -334,7 +320,7 @@ export async function paymentsWebhook(req, res) {
       }
 
       default:
-        console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
+        console.log(`ℹ️ Unhandled event: ${event.type}`);
     }
 
     res.json({ received: true });
@@ -402,6 +388,55 @@ router.post("/bill-recurring", async (req, res) => {
     res.json({ success: true, message: "Billing run complete" });
   } catch (err) {
     console.error("❌ Billing error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ============================================================
+   💸 POST /api/payments/refund
+============================================================ */
+router.post("/refund", async (req, res) => {
+  try {
+    const { payment_id, amount } = req.body;
+    if (!payment_id || !amount)
+      return res.status(400).json({ error: "Missing payment_id or amount" });
+
+    const { rows } = await pool.query(
+      `SELECT * FROM payments WHERE id=$1 LIMIT 1`,
+      [payment_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Payment not found" });
+
+    const p = rows[0];
+    if (p.method === "card" || p.method === "bacs_debit") {
+      await stripe.refunds.create({
+        payment_intent: p.reference,
+        amount: Math.round(Number(amount) * 100),
+      });
+    }
+
+    await pool.query(
+      `INSERT INTO refunds (payment_id, amount, created_at)
+       VALUES ($1,$2,NOW())`,
+      [p.id, amount]
+    );
+    await pool.query(
+      `UPDATE payments SET status='refunded' WHERE id=$1`,
+      [p.id]
+    );
+
+    await sendEmail({
+      to: p.customer_email || "info@pjhwebservices.co.uk",
+      subject: `Refund issued — £${Number(amount).toFixed(2)}`,
+      html: `<p>Your refund of £${Number(amount).toFixed(
+        2
+      )} has been processed successfully.</p>`,
+    });
+
+    console.log(`💸 Refunded payment ${p.id} (£${amount})`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("❌ Refund error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
