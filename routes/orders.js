@@ -9,7 +9,7 @@
  *  ✅ Invoice PDF generation + email delivery
  *  ✅ Invoice PDF preview (GET)
  *  ✅ Dynamic invoice filenames (PJH-INV-<order>-<type>.pdf)
- *  ✅ Payment reconciliation & order refresh
+ *  ✅ Payment reconciliation, refresh & refunds
  * ============================================================
  */
 
@@ -37,7 +37,6 @@ const FRONTEND_URL =
     ? "http://localhost:5173"
     : "https://www.pjhwebservices.co.uk");
 
-// Path setup (for Render-safe file resolution)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -114,6 +113,86 @@ router.get("/:id", async (req, res) => {
 });
 
 /* ============================================================
+   💰 GET /api/orders/:id/payments
+   (Fixes 404 on admin panel)
+============================================================ */
+router.get("/:id/payments", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(
+      `
+      SELECT id, order_id, customer_id, amount, type, method, status, reference, created_at
+      FROM payments
+      WHERE order_id=$1
+      ORDER BY created_at DESC;
+      `,
+      [id]
+    );
+    res.json({ success: true, payments: rows });
+  } catch (err) {
+    console.error("❌ Error fetching payments:", err);
+    res.status(500).json({ success: false, error: "Failed to fetch payments." });
+  }
+});
+
+/* ============================================================
+   💸 POST /api/payments/refund
+   (Supports refund from AdminOrderRecord)
+============================================================ */
+router.post("/refund", async (req, res) => {
+  const { payment_id, amount } = req.body;
+  if (!payment_id || !amount)
+    return res
+      .status(400)
+      .json({ success: false, error: "Missing payment_id or amount." });
+
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM payments WHERE id=$1 LIMIT 1",
+      [payment_id]
+    );
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: "Payment not found." });
+
+    const payment = rows[0];
+    const orderId = payment.order_id;
+
+    if (!payment.reference)
+      return res
+        .status(400)
+        .json({ success: false, error: "Payment has no Stripe reference." });
+
+    // Create Stripe refund
+    const refund = await stripe.refunds.create({
+      payment_intent: payment.reference,
+      amount: Math.round(amount * 100),
+      reason: "requested_by_customer",
+    });
+
+    // Record in DB
+    await pool.query(
+      `
+      INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+      VALUES ($1,$2,$3,'refund',$4,'refunded',$5);
+      `,
+      [orderId, payment.customer_id, -Math.abs(amount), payment.method, refund.id]
+    );
+
+    await pool.query(
+      `UPDATE orders SET total_paid = COALESCE(total_paid,0) - $1 WHERE id=$2;`,
+      [amount, orderId]
+    );
+
+    res.json({ success: true, message: "Refund processed successfully." });
+  } catch (err) {
+    console.error("❌ Refund error:", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to process refund." });
+  }
+});
+
+/* ============================================================
    🪄 POST /api/orders/from-quote/:quoteId
 ============================================================ */
 router.post("/from-quote/:quoteId", async (req, res) => {
@@ -181,137 +260,15 @@ router.post("/from-quote/:quoteId", async (req, res) => {
 });
 
 /* ============================================================
-   💳 POST /api/orders/:id/payment-link/:type
-============================================================ */
-router.post("/:id/payment-link/:type", async (req, res) => {
-  const { id, type } = req.params;
-  if (!["deposit", "balance"].includes(type))
-    return res.status(400).json({ success: false, error: "Invalid type." });
-
-  try {
-    const { rows } = await pool.query(
-      `
-      SELECT o.*, c.name, c.email
-      FROM orders o
-      JOIN customers c ON o.customer_id=c.id
-      WHERE o.id=$1;
-      `,
-      [id]
-    );
-
-    if (!rows.length)
-      return res.status(404).json({ success: false, error: "Order not found." });
-
-    const order = rows[0];
-    const amount =
-      type === "deposit" ? Number(order.deposit) : Number(order.balance);
-    if (amount <= 0)
-      return res
-        .status(400)
-        .json({ success: false, error: "No outstanding amount." });
-
-    const session = await stripe.checkout.sessions.create({
-      mode: "payment",
-      payment_method_types: ["card"],
-      line_items: [
-        {
-          price_data: {
-            currency: "gbp",
-            product_data: {
-              name: `${type === "deposit" ? "Deposit" : "Balance"} — ${
-                order.title
-              }`,
-            },
-            unit_amount: Math.round(amount * 100),
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        order_id: id,
-        customer_id: order.customer_id,
-        payment_type: type,
-      },
-      success_url: `${FRONTEND_URL}/payment-success?order=${id}&type=${type}`,
-      cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${id}`,
-      customer_email: order.email,
-    });
-
-    await sendEmail({
-      to: order.email,
-      subject: `Secure ${type} payment link — ${order.title}`,
-      html: paymentRequestTemplate({
-        customerName: order.name,
-        orderTitle: order.title,
-        amount,
-        link: session.url,
-        type,
-      }),
-    });
-
-    res.json({
-      success: true,
-      message: "Payment link created & emailed successfully.",
-      url: session.url,
-    });
-  } catch (err) {
-    console.error("❌ Error creating payment link:", err);
-    res.status(500).json({ success: false, error: "Failed to create link." });
-  }
-});
-
-/* ============================================================
-   💰 POST /api/orders/:id/payments
-============================================================ */
-router.post("/:id/payments", async (req, res) => {
-  const { id } = req.params;
-  const { amount, type, method, reference } = req.body;
-
-  try {
-    const { rows: orders } = await pool.query("SELECT * FROM orders WHERE id=$1", [id]);
-    if (!orders.length)
-      return res.status(404).json({ success: false, error: "Order not found." });
-
-    await pool.query(
-      `
-      INSERT INTO payments (order_id, amount, type, method, reference, status)
-      VALUES ($1,$2,$3,$4,$5,'paid');
-      `,
-      [id, amount, type, method, reference]
-    );
-
-    const flag =
-      type === "deposit"
-        ? "deposit_paid"
-        : type === "balance"
-        ? "balance_paid"
-        : null;
-
-    if (flag) {
-      await pool.query(
-        `UPDATE orders 
-         SET total_paid = COALESCE(total_paid,0) + $1, ${flag}=TRUE 
-         WHERE id=$2`,
-        [amount, id]
-      );
-    }
-
-    res.json({ success: true, message: "Payment recorded successfully." });
-  } catch (err) {
-    console.error("❌ Error recording payment:", err);
-    res.status(500).json({ success: false, error: "Failed to record payment." });
-  }
-});
-
-/* ============================================================
-   🧾 POST /api/orders/:id/invoice/:type
-   Generate + email invoice PDF
+   🧾 POST /api/orders/:id/invoice/:type (Generate + email)
 ============================================================ */
 router.post("/:id/invoice/:type", async (req, res) => {
   const { id, type } = req.params;
   const invoiceType = type.toLowerCase();
   if (!["deposit", "balance"].includes(invoiceType))
-    return res.status(400).json({ success: false, error: "Invalid invoice type." });
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid invoice type." });
 
   try {
     const { rows } = await pool.query(
@@ -361,65 +318,15 @@ router.post("/:id/invoice/:type", async (req, res) => {
       invoiceType === "deposit" ? "deposit_invoiced" : "balance_invoiced";
     await pool.query(`UPDATE orders SET ${flag}=TRUE WHERE id=$1`, [id]);
 
-    res.json({ success: true, message: `${invoiceType} invoice emailed successfully.` });
+    res.json({
+      success: true,
+      message: `${invoiceType} invoice emailed successfully.`,
+    });
   } catch (err) {
     console.error(`❌ Error sending ${type} invoice:`, err);
-    res.status(500).json({ success: false, error: `Failed to send ${type} invoice.` });
-  }
-});
-
-/* ============================================================
-   👀 GET /api/orders/:id/invoice/:type — Preview
-============================================================ */
-router.get("/:id/invoice/:type", async (req, res) => {
-  const { id, type } = req.params;
-  const invoiceType = type.toLowerCase();
-
-  if (!["deposit", "balance"].includes(invoiceType)) {
-    return res.status(400).json({ success: false, error: "Invalid invoice type." });
-  }
-
-  try {
-    const { rows } = await pool.query(
-      `SELECT o.*, c.* FROM orders o JOIN customers c ON o.customer_id = c.id WHERE o.id=$1`,
-      [id]
-    );
-    if (!rows.length)
-      return res.status(404).json({ success: false, error: "Order not found." });
-
-    const order = rows[0];
-    const filename = `PJH-INV-${order.id}-${invoiceType}.pdf`;
-
-    const pdfPath = path.resolve(
-      path.join(process.cwd(), "public", "invoices", filename)
-    );
-
-    if (fs.existsSync(pdfPath)) {
-      res.setHeader("Content-Type", "application/pdf");
-      return res.sendFile(pdfPath);
-    }
-
-    // If not found, regenerate
-    const { rows: payments } = await pool.query(
-      `SELECT * FROM payments WHERE order_id=$1 AND status='paid'`,
-      [id]
-    );
-    const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
-    const subtotal = Number(order.deposit || 0) + Number(order.balance || 0);
-    const balanceDue = Math.max(subtotal - totalPaid, 0);
-
-    const regenerated = await generateInvoicePDF(
-      { ...order, total_paid: totalPaid, balance_due: balanceDue },
-      invoiceType,
-      filename
-    );
-
-    console.log(`📄 Regenerated missing invoice: ${regenerated}`);
-    res.setHeader("Content-Type", "application/pdf");
-    res.sendFile(regenerated);
-  } catch (err) {
-    console.error(`❌ Error generating preview (${invoiceType}):`, err);
-    res.status(500).json({ success: false, error: "Failed to generate preview." });
+    res
+      .status(500)
+      .json({ success: false, error: `Failed to send ${type} invoice.` });
   }
 });
 
