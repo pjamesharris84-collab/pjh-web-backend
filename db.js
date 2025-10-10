@@ -2,15 +2,6 @@
  * ============================================================
  * PJH Web Services — Database Setup & Migrations (2025 Stable)
  * ============================================================
- * Centralised PostgreSQL pool setup and schema management.
- * Handles:
- *   • Non-destructive schema migration (no data loss)
- *   • Automatic table creation + patching
- *   • Default package & maintenance plan seeding
- *   • Stripe Direct Debit + recurring payment tracking
- *   • Auto-updated timestamps + indexed relationships
- *   • Refund-safe payments table
- * ============================================================
  */
 
 import dotenv from "dotenv";
@@ -76,13 +67,13 @@ pool.on("error", (err) => {
    Safe migrations (non-destructive)
 ------------------------------------------------------------ */
 export async function runMigrations() {
-  console.log("[DB] Running PostgreSQL migrations (non-destructive)...");
+  console.log("[DB] Running PostgreSQL migrations (non-destructive)…");
 
   try {
     await pool.query("BEGIN");
 
     /* ------------------------------------------------------------
-       1) Create missing tables (never drops; only creates)
+       1) Create tables (idempotent)
     ------------------------------------------------------------ */
     await pool.query(`
       CREATE TABLE IF NOT EXISTS customers (
@@ -115,6 +106,7 @@ export async function runMigrations() {
         term_months INTEGER DEFAULT 24,
         features TEXT[] DEFAULT '{}',
         discount_percent NUMERIC(5,2) DEFAULT 0,
+        visible BOOLEAN DEFAULT TRUE,
         pricing_guardrails JSONB DEFAULT '{}'::jsonb,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -127,16 +119,15 @@ export async function runMigrations() {
         quote_number VARCHAR(255) UNIQUE,
         title VARCHAR(255) NOT NULL,
         description TEXT,
-        items JSONB NOT NULL DEFAULT '[]',
+        items JSONB NOT NULL DEFAULT '[]'::jsonb,
         deposit NUMERIC(10,2) DEFAULT 0,
         custom_price NUMERIC(10,2),
         discount_percent NUMERIC(5,2) DEFAULT 0,
         notes TEXT,
         status VARCHAR(20) DEFAULT 'pending'
-          CHECK (status IN ('pending','accepted','rejected','amend_requested')),
+          CHECK (status IN ('pending','closed')),
         pricing_mode VARCHAR(20) DEFAULT 'oneoff'
           CHECK (pricing_mode IN ('oneoff','monthly')),
-        feedback TEXT,
         response_token VARCHAR(255) UNIQUE,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -150,11 +141,11 @@ export async function runMigrations() {
         description TEXT,
         status VARCHAR(20) DEFAULT 'in_progress'
           CHECK (status IN ('in_progress','completed','cancelled')),
-        items JSONB NOT NULL DEFAULT '[]',
-        tasks JSONB NOT NULL DEFAULT '[]',
+        items JSONB NOT NULL DEFAULT '[]'::jsonb,
+        tasks JSONB NOT NULL DEFAULT '[]'::jsonb,
         deposit NUMERIC(10,2) DEFAULT 0,
         balance NUMERIC(10,2) DEFAULT 0,
-        diary JSONB NOT NULL DEFAULT '[]',
+        diary JSONB NOT NULL DEFAULT '[]'::jsonb,
         deposit_invoiced BOOLEAN DEFAULT false,
         balance_invoiced BOOLEAN DEFAULT false,
         deposit_paid BOOLEAN DEFAULT false,
@@ -198,6 +189,7 @@ export async function runMigrations() {
         price NUMERIC(10,2) NOT NULL,
         description TEXT,
         features TEXT[] DEFAULT '{}',
+        visible BOOLEAN DEFAULT TRUE,
         sort_order INT DEFAULT 100,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -223,7 +215,7 @@ export async function runMigrations() {
     console.log("[DB] Core and maintenance tables verified/created.");
 
     /* ------------------------------------------------------------
-       2) Timestamp triggers (auto-update updated_at)
+       2) Timestamp triggers
     ------------------------------------------------------------ */
     await pool.query(`
       CREATE OR REPLACE FUNCTION update_timestamp()
@@ -273,39 +265,33 @@ export async function runMigrations() {
       END$$;
     `);
 
-    console.log("[DB] Timestamp triggers ensured.");
-
     /* ------------------------------------------------------------
-       3) Index optimisation
+       3) Indexes
     ------------------------------------------------------------ */
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
       CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
       CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
 
+      CREATE INDEX IF NOT EXISTS idx_packages_visible ON packages(visible);
       CREATE INDEX IF NOT EXISTS idx_maint_plans_sort ON maintenance_plans(sort_order);
+      CREATE INDEX IF NOT EXISTS idx_maint_plans_visible ON maintenance_plans(visible, sort_order);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_status ON maintenance_signups(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_email ON maintenance_signups(email);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_plan_id ON maintenance_signups(plan_id);
     `);
 
-    console.log("[DB] Indexes confirmed.");
-
     /* ------------------------------------------------------------
-       4) Backfill self-healing columns on legacy schemas
+       4) Backfill / patch legacy schemas
+          - ensure maintenance_signups.plan_id exists + FK
+          - ensure maintenance_plans.visible (older installs)
+          - ensure packages.visible (older installs)
+          - restrict quotes.status to ('pending','closed') only
     ------------------------------------------------------------ */
     await pool.query(`
       DO $$
       BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='payments' AND column_name='status'
-        ) THEN
-          ALTER TABLE payments
-          ADD COLUMN status VARCHAR(50) DEFAULT 'pending'
-          CHECK (status IN ('pending','paid','failed','cancelled','refunded'));
-        END IF;
-
+        -- packages.visible
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='packages' AND column_name='visible'
@@ -313,27 +299,64 @@ export async function runMigrations() {
           ALTER TABLE packages ADD COLUMN visible BOOLEAN DEFAULT TRUE;
         END IF;
 
+        -- maintenance_plans.visible
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='maintenance_plans' AND column_name='visible'
         ) THEN
           ALTER TABLE maintenance_plans ADD COLUMN visible BOOLEAN DEFAULT TRUE;
         END IF;
+
+        -- maintenance_signups.plan_id (column)
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='maintenance_signups' AND column_name='plan_id'
+        ) THEN
+          ALTER TABLE maintenance_signups ADD COLUMN plan_id INT;
+        END IF;
+
+        -- maintenance_signups.plan_id (FK)
+        IF NOT EXISTS (
+          SELECT 1
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu
+            ON tc.constraint_name = kcu.constraint_name
+          WHERE tc.table_name = 'maintenance_signups'
+            AND tc.constraint_type = 'FOREIGN KEY'
+            AND kcu.column_name = 'plan_id'
+        ) THEN
+          ALTER TABLE maintenance_signups
+            ADD CONSTRAINT maintenance_signups_plan_id_fkey
+            FOREIGN KEY (plan_id) REFERENCES maintenance_plans(id) ON DELETE SET NULL;
+        END IF;
+
+        -- Lock down quotes.status to ONLY ('pending','closed'):
+        -- drop ONLY status-related CHECK constraints (keep others)
+        PERFORM 1;
+        FOR
+          SELECT conname
+          FROM pg_constraint
+          WHERE conrelid = 'quotes'::regclass
+            AND contype = 'c'
+            AND pg_get_constraintdef(oid) ILIKE '%status%'
+        LOOP
+          EXECUTE format('ALTER TABLE quotes DROP CONSTRAINT IF EXISTS %I', conname);
+        END LOOP;
+
+        -- add the correct one
+        BEGIN
+          ALTER TABLE quotes
+            ADD CONSTRAINT quotes_status_check
+            CHECK (status IN ('pending','closed'));
+        EXCEPTION WHEN duplicate_object THEN
+          -- already present
+          NULL;
+        END;
       END$$;
     `);
 
-    console.log("[DB] Legacy column backfill ensured (status, visible).");
-
     /* ------------------------------------------------------------
-       5) Optional indexes that depend on backfilled columns
-    ------------------------------------------------------------ */
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_packages_visible ON packages(visible);
-      CREATE INDEX IF NOT EXISTS idx_maint_plans_visible ON maintenance_plans(visible, sort_order);
-    `);
-
-    /* ------------------------------------------------------------
-       6) Seed default data (only when empty)
+       5) Seed defaults (only when empty)
     ------------------------------------------------------------ */
     const { rows: pkgCountRows } = await pool.query(
       "SELECT COUNT(*)::int AS count FROM packages;"
@@ -380,8 +403,8 @@ export async function runMigrations() {
 
         await pool.query(
           `INSERT INTO packages
-           (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails)
-           VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb);`,
+           (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,$7::jsonb,NOW(),NOW());`,
           [
             pkg.name,
             pkg.tagline,
@@ -445,8 +468,8 @@ export async function runMigrations() {
       for (const p of plans) {
         await pool.query(
           `INSERT INTO maintenance_plans
-           (name, price, description, features, visible, sort_order)
-           VALUES ($1,$2,$3,$4, TRUE, $5);`,
+           (name, price, description, features, visible, sort_order, created_at, updated_at)
+           VALUES ($1,$2,$3,$4, TRUE, $5, NOW(), NOW());`,
           [p.name, p.price, p.description, p.features, p.sort_order]
         );
       }
@@ -468,10 +491,6 @@ export async function runMigrations() {
 /* ------------------------------------------------------------
    Utilities
 ------------------------------------------------------------ */
-export function generateResponseToken() {
-  return crypto.randomUUID();
-}
-
 export async function generateQuoteNumber(customerId, businessName = "Customer") {
   const safeBusiness = (businessName || "Customer")
     .replace(/[^a-zA-Z0-9\s-]/g, "")
@@ -487,7 +506,4 @@ export async function generateQuoteNumber(customerId, businessName = "Customer")
   return `PJH-WS/${safeBusiness}/${String(count).padStart(6, "0")}`;
 }
 
-/* ------------------------------------------------------------
-   Default export
------------------------------------------------------------- */
 export default pool;
