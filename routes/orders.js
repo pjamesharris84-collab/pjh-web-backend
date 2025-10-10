@@ -8,6 +8,7 @@
  *  ✅ Refund-aware total reconciliation
  *  ✅ Invoice generation + email delivery
  *  ✅ Dynamic totals (paid, refunded, balance)
+ *  ✅ Safe order deletion
  * ============================================================
  */
 
@@ -36,14 +37,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /* ============================================================
-   🧱 GET /api/orders
+   🧱 GET /api/orders  — List all orders
 ============================================================ */
 router.get("/", async (_req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT 
-        o.*, c.business AS customer_business, c.name AS customer_name,
-        c.email AS customer_email, c.phone AS customer_phone
+        o.*, 
+        c.business AS customer_business, 
+        c.name AS customer_name,
+        c.email AS customer_email, 
+        c.phone AS customer_phone
       FROM orders o
       JOIN customers c ON o.customer_id = c.id
       ORDER BY o.created_at DESC;
@@ -56,7 +60,7 @@ router.get("/", async (_req, res) => {
 });
 
 /* ============================================================
-   🔍 GET /api/orders/:id (refund-aware totals)
+   🔍 GET /api/orders/:id — Refund-aware totals
 ============================================================ */
 router.get("/:id", async (req, res) => {
   const { id } = req.params;
@@ -64,8 +68,11 @@ router.get("/:id", async (req, res) => {
     const { rows } = await pool.query(
       `
       SELECT 
-        o.*, c.business AS customer_business, c.name AS customer_name,
-        c.email AS customer_email, c.phone AS customer_phone,
+        o.*, 
+        c.business AS customer_business, 
+        c.name AS customer_name,
+        c.email AS customer_email, 
+        c.phone AS customer_phone,
         c.address1, c.address2, c.city, c.county, c.postcode,
         c.direct_debit_active
       FROM orders o
@@ -118,7 +125,7 @@ router.get("/:id", async (req, res) => {
 });
 
 /* ============================================================
-   💰 GET /api/orders/:id/payments (includes refunds)
+   💰 GET /api/orders/:id/payments — Includes refunds
 ============================================================ */
 router.get("/:id/payments", async (req, res) => {
   const { id } = req.params;
@@ -140,7 +147,7 @@ router.get("/:id/payments", async (req, res) => {
 });
 
 /* ============================================================
-   💸 POST /api/payments/refund (Stripe + record in payments)
+   💸 POST /api/payments/refund — Stripe refund + record
 ============================================================ */
 router.post("/refund", async (req, res) => {
   const { payment_id, amount } = req.body;
@@ -187,16 +194,20 @@ router.post("/refund", async (req, res) => {
 });
 
 /* ============================================================
-   🔁 GET /api/orders/:id/refresh (re-syncs totals)
+   🔁 GET /api/orders/:id/refresh — Re-sync totals
 ============================================================ */
 router.get("/:id/refresh", async (req, res) => {
   const { id } = req.params;
   try {
     const { rows } = await pool.query(
       `
-      SELECT o.*, c.business AS customer_business, c.name AS customer_name,
-             c.email AS customer_email, c.phone AS customer_phone,
-             c.direct_debit_active
+      SELECT 
+        o.*, 
+        c.business AS customer_business, 
+        c.name AS customer_name,
+        c.email AS customer_email, 
+        c.phone AS customer_phone,
+        c.direct_debit_active
       FROM orders o
       JOIN customers c ON o.customer_id=c.id
       WHERE o.id=$1;
@@ -228,6 +239,36 @@ router.get("/:id/refresh", async (req, res) => {
   } catch (err) {
     console.error("❌ Error refreshing order:", err);
     res.status(500).json({ success: false, error: "Failed to refresh order." });
+  }
+});
+
+/* ============================================================
+   🗑️ DELETE /api/orders/:id — Delete order + dependencies
+============================================================ */
+router.delete("/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Start a transaction to ensure atomic cleanup
+    await pool.query("BEGIN");
+
+    // Delete associated payments first
+    await pool.query("DELETE FROM payments WHERE order_id = $1;", [id]);
+
+    // Delete the order itself
+    const result = await pool.query("DELETE FROM orders WHERE id = $1 RETURNING *;", [id]);
+
+    if (!result.rowCount) {
+      await pool.query("ROLLBACK");
+      return res.status(404).json({ success: false, error: "Order not found." });
+    }
+
+    await pool.query("COMMIT");
+    console.log(`🗑️ Order ${id} and associated payments deleted.`);
+    res.json({ success: true, message: "Order deleted successfully." });
+  } catch (err) {
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("❌ Error deleting order:", err);
+    res.status(500).json({ success: false, error: "Failed to delete order." });
   }
 });
 
