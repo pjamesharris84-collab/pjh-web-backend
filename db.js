@@ -9,6 +9,7 @@
  *   • Default package & maintenance plan seeding
  *   • Stripe Direct Debit + recurring payment tracking
  *   • Auto-updated timestamps + indexed relationships
+ *   • Refund-safe payments table
  * ============================================================
  */
 
@@ -112,7 +113,6 @@ export async function runMigrations() {
         term_months INTEGER DEFAULT 24,
         features TEXT[] DEFAULT '{}',
         discount_percent NUMERIC(5,2) DEFAULT 0,
-        -- visible added explicitly via patch block below for legacy installs
         pricing_guardrails JSONB DEFAULT '{}'::jsonb,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -126,7 +126,7 @@ export async function runMigrations() {
         title VARCHAR(255) NOT NULL,
         description TEXT,
         items JSONB NOT NULL DEFAULT '[]',
-        deposit NUMERIC(10,2) NOT NULL DEFAULT 0,
+        deposit NUMERIC(10,2) DEFAULT 0,
         custom_price NUMERIC(10,2),
         discount_percent NUMERIC(5,2) DEFAULT 0,
         notes TEXT,
@@ -172,7 +172,7 @@ export async function runMigrations() {
         customer_id INT REFERENCES customers(id) ON DELETE SET NULL,
         amount NUMERIC(10,2) NOT NULL,
         type VARCHAR(20)
-          CHECK (type IN ('deposit','balance','full','monthly')),
+          CHECK (type IN ('deposit','balance','refund','monthly','full')),
         method VARCHAR(50),
         reference VARCHAR(255),
         notes TEXT,
@@ -196,7 +196,6 @@ export async function runMigrations() {
         price NUMERIC(10,2) NOT NULL,
         description TEXT,
         features TEXT[] DEFAULT '{}',
-        -- visible added explicitly via patch block below for legacy installs
         sort_order INT DEFAULT 100,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -457,7 +456,9 @@ export async function runMigrations() {
       }
       console.log("[DB] Default maintenance plans seeded.");
     } else {
-      console.log(`[DB] Maintenance plans present: ${maintCountRows[0].count} (seed skipped).`);
+      console.log(
+        `[DB] Maintenance plans present: ${maintCountRows[0].count} (seed skipped).`
+      );
     }
 
     await pool.query("COMMIT");
