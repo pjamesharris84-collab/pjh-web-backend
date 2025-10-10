@@ -28,7 +28,7 @@ import packagesRouter from "./routes/packages.js";
 import maintenanceRouter from "./routes/maintenance.js";
 
 // ✅ Unified Stripe Checkout + Direct Debit Billing
-import paymentsRouter, { paymentsWebhook } from "./routes/payments.js";
+import paymentsRouter from "./routes/payments.js";
 
 dotenv.config();
 const app = express();
@@ -82,15 +82,6 @@ app.options("*", (req, res) => {
   res.header("Access-Control-Allow-Credentials", "true");
   res.sendStatus(200);
 });
-
-/* ============================================================
-   ⚙️ Stripe Webhook — must be BEFORE express.json()
-============================================================ */
-app.post(
-  "/api/payments/webhook",
-  express.raw({ type: "application/json" }),
-  paymentsWebhook
-);
 
 /* ============================================================
    🧠 Environment Summary
