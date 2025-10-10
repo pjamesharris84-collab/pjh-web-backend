@@ -394,51 +394,60 @@ router.post("/bill-recurring", async (req, res) => {
 
 /* ============================================================
    💸 POST /api/payments/refund
+   Unified Refund API — uses payments table, not refunds
 ============================================================ */
 router.post("/refund", async (req, res) => {
-  try {
-    const { payment_id, amount } = req.body;
-    if (!payment_id || !amount)
-      return res.status(400).json({ error: "Missing payment_id or amount" });
+  const { payment_id, amount } = req.body;
+  if (!payment_id || !amount)
+    return res
+      .status(400)
+      .json({ success: false, error: "Missing payment_id or amount." });
 
+  try {
     const { rows } = await pool.query(
-      `SELECT * FROM payments WHERE id=$1 LIMIT 1`,
+      "SELECT * FROM payments WHERE id=$1 LIMIT 1",
       [payment_id]
     );
-    if (!rows.length) return res.status(404).json({ error: "Payment not found" });
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: "Payment not found." });
 
-    const p = rows[0];
-    if (p.method === "card" || p.method === "bacs_debit") {
-      await stripe.refunds.create({
-        payment_intent: p.reference,
-        amount: Math.round(Number(amount) * 100),
-      });
-    }
+    const payment = rows[0];
+    const orderId = payment.order_id;
 
-    await pool.query(
-      `INSERT INTO refunds (payment_id, amount, created_at)
-       VALUES ($1,$2,NOW())`,
-      [p.id, amount]
-    );
-    await pool.query(
-      `UPDATE payments SET status='refunded' WHERE id=$1`,
-      [p.id]
-    );
+    if (!payment.reference)
+      return res
+        .status(400)
+        .json({ success: false, error: "Payment has no Stripe reference." });
 
-    await sendEmail({
-      to: p.customer_email || "info@pjhwebservices.co.uk",
-      subject: `Refund issued — £${Number(amount).toFixed(2)}`,
-      html: `<p>Your refund of £${Number(amount).toFixed(
-        2
-      )} has been processed successfully.</p>`,
+    // Stripe refund
+    const refund = await stripe.refunds.create({
+      payment_intent: payment.reference,
+      amount: Math.round(amount * 100),
+      reason: "requested_by_customer",
     });
 
-    console.log(`💸 Refunded payment ${p.id} (£${amount})`);
-    res.json({ success: true });
+    // ✅ Record refund in payments table
+    await pool.query(
+      `
+      INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+      VALUES ($1,$2,$3,'refund',$4,'refunded',$5);
+      `,
+      [orderId, payment.customer_id, -Math.abs(amount), payment.method, refund.id]
+    );
+
+    // ✅ Adjust total paid
+    await pool.query(
+      `UPDATE orders SET total_paid = COALESCE(total_paid,0) - $1 WHERE id=$2;`,
+      [amount, orderId]
+    );
+
+    console.log(`💸 Refund processed for order ${orderId}: £${amount.toFixed(2)}`);
+    res.json({ success: true, message: "Refund processed successfully." });
   } catch (err) {
     console.error("❌ Refund error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 export default router;
