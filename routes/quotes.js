@@ -1,9 +1,11 @@
 /**
  * ============================================================
- * PJH Web Services — Quotes API (2025 Update)
+ * PJH Web Services — Quotes API (2025 Streamlined)
  * ============================================================
- * Customer routes  → mounted at /api/customers
- * Admin routes     → mounted at /api/quotes
+ * Simplified:
+ *   • Removed accept/reject/amend logic
+ *   • Only supports "pending" or "closed"
+ *   • Convert to order remains intact
  * ============================================================
  */
 
@@ -14,7 +16,7 @@ import fs from "fs";
 import pool, { generateQuoteNumber } from "../db.js";
 import { generateResponseToken } from "../utils/token.js";
 import { sendEmail } from "../utils/email.js";
-import { generateQuotePDF } from "../utils/pdf.js"; // ✅ updated import
+import { generateQuotePDF } from "../utils/pdf.js";
 import { toArray, calcSubtotal, findQuote } from "../utils/quotes.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -290,7 +292,7 @@ quotesAdminRouter.post("/:quoteId/email", async (req, res) => {
   }
 });
 
-// 👁️ Preview Quote (Admin) — NEW
+// 👁️ Preview Quote (Admin)
 quotesAdminRouter.post("/:quoteId/preview", async (req, res) => {
   const { quoteId } = req.params;
 
@@ -326,32 +328,6 @@ quotesAdminRouter.post("/:quoteId/preview", async (req, res) => {
   }
 });
 
-// 🟢 Accept / 🔴 Reject Quote
-const updateQuoteStatus = async (req, res, status) => {
-  const { quoteId } = req.params;
-  const feedback = req.body?.feedback || null;
-  try {
-    const { rows } = await pool.query(
-      "UPDATE quotes SET status=$1, updated_at=NOW() WHERE id=$2 RETURNING *;",
-      [status, quoteId]
-    );
-    if (!rows.length)
-      return res.status(404).json({ success: false, message: "Quote not found." });
-
-    await pool.query(
-      "INSERT INTO quote_history (quote_id, action, feedback, actor) VALUES ($1,$2,$3,'admin');",
-      [quoteId, status, feedback]
-    );
-    res.json({ success: true, quote: rows[0], message: `Quote ${status}.` });
-  } catch (err) {
-    console.error(`❌ Error setting quote ${status}:`, err);
-    res.status(500).json({ success: false, error: `Failed to set quote ${status}.` });
-  }
-};
-
-quotesAdminRouter.post("/:quoteId/accept", (req, res) => updateQuoteStatus(req, res, "accepted"));
-quotesAdminRouter.post("/:quoteId/reject", (req, res) => updateQuoteStatus(req, res, "rejected"));
-
 // 🧩 Create Order from Quote
 quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   const { quoteId } = req.params;
@@ -363,12 +339,6 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
     const existing = await pool.query("SELECT id FROM orders WHERE quote_id=$1", [quoteId]);
     if (existing.rows.length)
       return res.json({ success: true, order: existing.rows[0], message: "Order already exists." });
-
-    if (q.status !== "accepted")
-      return res.status(400).json({
-        success: false,
-        message: "Quote must be accepted before creating an order.",
-      });
 
     const total = calcSubtotal(q.items);
     const deposit = Number(q.deposit ?? total * 0.5);
@@ -393,7 +363,7 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
     );
 
     await pool.query(
-      "INSERT INTO quote_history (quote_id, action, actor) VALUES ($1,'converted_to_order','admin');",
+      "UPDATE quotes SET status='closed', updated_at=NOW() WHERE id=$1;",
       [quoteId]
     );
 
@@ -401,18 +371,5 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   } catch (err) {
     console.error("❌ Error creating order from quote:", err);
     res.status(500).json({ success: false, error: "Failed to create order." });
-  }
-});
-
-// 🔗 Get Linked Order
-quotesAdminRouter.get("/:quoteId/order", async (req, res) => {
-  try {
-    const { rows } = await pool.query("SELECT * FROM orders WHERE quote_id=$1", [
-      req.params.quoteId,
-    ]);
-    res.json({ success: true, order: rows[0] || null });
-  } catch (err) {
-    console.error("❌ Error fetching linked order:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch linked order." });
   }
 });

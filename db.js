@@ -16,6 +16,7 @@
 import dotenv from "dotenv";
 import pkg from "pg";
 import crypto from "crypto";
+
 dotenv.config();
 
 const { Pool } = pkg;
@@ -63,6 +64,7 @@ pool.on("connect", () => {
         }
       })()
     : process.env.PG_HOST || "localhost";
+
   console.log(`[DB] Connected to PostgreSQL (${host})`);
 });
 
@@ -281,7 +283,6 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
       CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
 
-      -- Maintenance indexes
       CREATE INDEX IF NOT EXISTS idx_maint_plans_sort ON maintenance_plans(sort_order);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_status ON maintenance_signups(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_email ON maintenance_signups(email);
@@ -292,14 +293,10 @@ export async function runMigrations() {
 
     /* ------------------------------------------------------------
        4) Backfill self-healing columns on legacy schemas
-          - payments.status
-          - packages.visible
-          - maintenance_plans.visible
     ------------------------------------------------------------ */
     await pool.query(`
       DO $$
       BEGIN
-        -- payments.status
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='payments' AND column_name='status'
@@ -309,7 +306,6 @@ export async function runMigrations() {
           CHECK (status IN ('pending','paid','failed','cancelled','refunded'));
         END IF;
 
-        -- packages.visible
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='packages' AND column_name='visible'
@@ -317,7 +313,6 @@ export async function runMigrations() {
           ALTER TABLE packages ADD COLUMN visible BOOLEAN DEFAULT TRUE;
         END IF;
 
-        -- maintenance_plans.visible
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='maintenance_plans' AND column_name='visible'
@@ -343,6 +338,7 @@ export async function runMigrations() {
     const { rows: pkgCountRows } = await pool.query(
       "SELECT COUNT(*)::int AS count FROM packages;"
     );
+
     if ((pkgCountRows?.[0]?.count ?? 0) === 0) {
       const defaults = [
         {
