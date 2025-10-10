@@ -25,6 +25,7 @@ import responsesRoutes from "./routes/responses.js";
 import orderDiaryRoutes from "./routes/orderDiary.js";
 import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 import packagesRouter from "./routes/packages.js";
+import maintenanceRouter from "./routes/maintenance.js";
 
 // ✅ Unified Stripe Checkout + Direct Debit Billing
 import paymentsRouter, { paymentsWebhook } from "./routes/payments.js";
@@ -157,6 +158,7 @@ app.use("/api/orders", orderRoutes);
 app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
 app.use("/api/packages", packagesRouter);
+app.use("/api/maintenance", maintenanceRouter);
 
 // ✅ Dedicated Order Diary
 app.use("/api/diary", orderDiaryRoutes);

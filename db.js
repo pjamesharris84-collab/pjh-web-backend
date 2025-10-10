@@ -6,7 +6,7 @@
  * Handles:
  *   • Non-destructive schema migration (no data loss)
  *   • Automatic table creation + patching
- *   • Default package seeding
+ *   • Default package & maintenance plan seeding
  *   • Stripe Direct Debit + recurring payment tracking
  *   • Auto-updated timestamps + indexed relationships
  * ============================================================
@@ -180,9 +180,40 @@ export async function runMigrations() {
           CHECK (status IN ('pending','paid','failed','cancelled','refunded')),
         created_at TIMESTAMP DEFAULT NOW()
       );
+
+      /* ================================
+         🧰 Maintenance Plans & Signups
+         ================================ */
+      CREATE TABLE IF NOT EXISTS maintenance_plans (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        price NUMERIC(10,2) NOT NULL,
+        description TEXT,
+        features TEXT[] DEFAULT '{}',
+        visible BOOLEAN DEFAULT TRUE,
+        sort_order INT DEFAULT 100,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS maintenance_signups (
+        id SERIAL PRIMARY KEY,
+        customer_name VARCHAR(150) NOT NULL,
+        email VARCHAR(150) NOT NULL,
+        plan_id INT REFERENCES maintenance_plans(id) ON DELETE SET NULL,
+        plan_name VARCHAR(100),
+        plan_price NUMERIC(10,2),
+        status VARCHAR(50) DEFAULT 'pending'
+          CHECK (status IN ('pending','active','cancelled','failed')),
+        stripe_checkout_session_id TEXT,
+        stripe_subscription_id TEXT,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      );
     `);
 
-    console.log("✅ Core tables verified/created.");
+    console.log("✅ Core + maintenance tables verified/created.");
 
     /* ------------------------------------------------------------
        2️⃣ Timestamp triggers (auto-update updated_at)
@@ -211,6 +242,27 @@ export async function runMigrations() {
           FOR EACH ROW
           EXECUTE FUNCTION update_timestamp();
         END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_packages_timestamp') THEN
+          CREATE TRIGGER update_packages_timestamp
+          BEFORE UPDATE ON packages
+          FOR EACH ROW
+          EXECUTE FUNCTION update_timestamp();
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_maintenance_plans_timestamp') THEN
+          CREATE TRIGGER update_maintenance_plans_timestamp
+          BEFORE UPDATE ON maintenance_plans
+          FOR EACH ROW
+          EXECUTE FUNCTION update_timestamp();
+        END IF;
+
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_maintenance_signups_timestamp') THEN
+          CREATE TRIGGER update_maintenance_signups_timestamp
+          BEFORE UPDATE ON maintenance_signups
+          FOR EACH ROW
+          EXECUTE FUNCTION update_timestamp();
+        END IF;
       END$$;
     `);
 
@@ -223,6 +275,12 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
       CREATE INDEX IF NOT EXISTS idx_payments_order_id ON payments(order_id);
       CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
+
+      -- Maintenance indexes
+      CREATE INDEX IF NOT EXISTS idx_maint_plans_visible ON maintenance_plans(visible, sort_order);
+      CREATE INDEX IF NOT EXISTS idx_maint_signups_status ON maintenance_signups(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_maint_signups_email ON maintenance_signups(email);
+      CREATE INDEX IF NOT EXISTS idx_maint_signups_plan_id ON maintenance_signups(plan_id);
     `);
 
     console.log("⚡ Indexes confirmed.");
@@ -244,10 +302,34 @@ export async function runMigrations() {
     }
 
     /* ------------------------------------------------------------
-       5️⃣ Seed default packages if empty
+       5️⃣ Ensure 'visible' columns exist where expected
     ------------------------------------------------------------ */
-    const { rows } = await pool.query("SELECT COUNT(*)::int AS count FROM packages;");
-    if (rows[0].count === 0) {
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name='maintenance_plans' AND column_name='visible'
+        ) THEN
+          ALTER TABLE maintenance_plans ADD COLUMN visible BOOLEAN DEFAULT TRUE;
+        END IF;
+
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns 
+          WHERE table_name='packages' AND column_name='visible'
+        ) THEN
+          ALTER TABLE packages ADD COLUMN visible BOOLEAN DEFAULT TRUE;
+        END IF;
+      END$$;
+    `);
+
+    /* ------------------------------------------------------------
+       6️⃣ Seed default data
+    ------------------------------------------------------------ */
+    const { rows: pkgCountRows } = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM packages;"
+    );
+    if (pkgCountRows[0].count === 0) {
       const defaults = [
         {
           name: "Starter",
@@ -263,12 +345,7 @@ export async function runMigrations() {
           price_oneoff: 2600,
           price_monthly: 140,
           term_months: 24,
-          features: [
-            "All Starter features",
-            "Booking system",
-            "Invoicing tools",
-            "CRM core",
-          ],
+          features: ["All Starter features", "Booking system", "Invoicing tools", "CRM core"],
         },
         {
           name: "Premium",
@@ -276,12 +353,7 @@ export async function runMigrations() {
           price_oneoff: 6000,
           price_monthly: 300,
           term_months: 24,
-          features: [
-            "All Business features",
-            "Custom APIs",
-            "Automations",
-            "Priority support",
-          ],
+          features: ["All Business features", "Custom APIs", "Automations", "Priority support"],
         },
       ];
 
@@ -311,10 +383,62 @@ export async function runMigrations() {
           ]
         );
       }
+      console.log("🌱 Default website packages seeded successfully.");
+    }
 
-      console.log("🌱 Default packages seeded successfully.");
-    } else {
-      console.log(`🌱 ${rows[0].count} packages already exist — skipping seed.`);
+    const { rows: maintCountRows } = await pool.query(
+      "SELECT COUNT(*)::int AS count FROM maintenance_plans;"
+    );
+
+    if (maintCountRows[0].count === 0) {
+      const plans = [
+        {
+          name: "Essential Care",
+          price: 35.0,
+          description: "Core updates, backups, and security monitoring.",
+          features: [
+            "Weekly backups",
+            "CMS & plugin updates",
+            "Security scans",
+            "Uptime monitoring",
+          ],
+          sort_order: 10,
+        },
+        {
+          name: "Performance Care",
+          price: 95.0,
+          description: "Performance, SEO, and reporting for growing businesses.",
+          features: [
+            "Everything in Essential",
+            "Speed optimisation",
+            "SEO health check",
+            "Monthly report",
+          ],
+          sort_order: 20,
+        },
+        {
+          name: "Total WebCare",
+          price: 195.0,
+          description: "Full service for mission-critical sites with 24h support.",
+          features: [
+            "Everything in Performance",
+            "3 hrs monthly updates",
+            "Priority support (24h)",
+            "Emergency fixes included",
+          ],
+          sort_order: 30,
+        },
+      ];
+
+      for (const p of plans) {
+        await pool.query(
+          `INSERT INTO maintenance_plans
+           (name, price, description, features, visible, sort_order)
+           VALUES ($1,$2,$3,$4, TRUE, $5);`,
+          [p.name, p.price, p.description, p.features, p.sort_order]
+        );
+      }
+      console.log("🌱 Default maintenance plans seeded successfully.");
     }
 
     await pool.query("COMMIT");
@@ -334,12 +458,12 @@ export function generateResponseToken() {
 
 export async function generateQuoteNumber(customerId, businessName = "Customer") {
   const safeBusiness = (businessName || "Customer")
-    .replace(/[^a-zA-Z0-9\\s-]/g, "")
-    .replace(/\\s+/g, "-")
+    .replace(/[^a-zA-Z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
     .toUpperCase();
 
   const { rows } = await pool.query(
-    `SELECT COUNT(*)::int AS count FROM quotes WHERE customer_id = $1`,
+    "SELECT COUNT(*)::int AS count FROM quotes WHERE customer_id = $1",
     [customerId]
   );
 
