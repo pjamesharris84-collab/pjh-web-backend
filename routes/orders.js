@@ -37,7 +37,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /* ============================================================
-   🧱 GET /api/orders  — List all orders
+   🧱 GET /api/orders — List all orders
 ============================================================ */
 router.get("/", async (_req, res) => {
   try {
@@ -61,7 +61,7 @@ router.get("/", async (_req, res) => {
 
 /* ============================================================
    🆕 POST /api/orders/from-quote/:quoteId
-   Creates a new order from an existing quote
+   Creates a new order from an existing quote (safe JSON insert)
 ============================================================ */
 router.post("/from-quote/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
@@ -77,7 +77,7 @@ router.post("/from-quote/:quoteId", async (req, res) => {
 
     const quote = quoteRows[0];
 
-    // 2️⃣ Prevent duplicates
+    // 2️⃣ Prevent duplicate orders
     const { rows: existing } = await pool.query(
       "SELECT id FROM orders WHERE quote_id = $1 LIMIT 1;",
       [quoteId]
@@ -89,17 +89,30 @@ router.post("/from-quote/:quoteId", async (req, res) => {
         order_id: existing[0].id,
       });
 
-    // 3️⃣ Insert order
-    const balance =
-      Number(quote.custom_price || 0) - Number(quote.deposit || 0);
+    // 3️⃣ Safely parse quote.items JSON
+    let items = [];
+    try {
+      if (typeof quote.items === "string") items = JSON.parse(quote.items);
+      else if (Array.isArray(quote.items)) items = quote.items;
+      else items = [];
+    } catch {
+      console.warn("⚠️ Quote items could not be parsed; defaulting to []");
+      items = [];
+    }
 
+    // 4️⃣ Calculate financials
+    const deposit = Number(quote.deposit || 0);
+    const total = Number(quote.custom_price || quote.total_after_discount || 0);
+    const balance = Math.max(total - deposit, 0);
+
+    // 5️⃣ Insert order (force valid JSONB)
     const { rows: inserted } = await pool.query(
       `
       INSERT INTO orders (
-        customer_id, quote_id, title, description, items, deposit, balance,
-        status, tasks, diary, deposit_paid, balance_paid
+        customer_id, quote_id, title, description, items,
+        deposit, balance, status, tasks, diary, deposit_paid, balance_paid
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,'in_progress','[]'::jsonb,'[]'::jsonb,false,false)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,'in_progress','[]'::jsonb,'[]'::jsonb,false,false)
       RETURNING *;
       `,
       [
@@ -107,8 +120,8 @@ router.post("/from-quote/:quoteId", async (req, res) => {
         quote.id,
         quote.title,
         quote.description || "",
-        quote.items || [],
-        quote.deposit || 0,
+        JSON.stringify(items),
+        deposit,
         balance,
       ]
     );
