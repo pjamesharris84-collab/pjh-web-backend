@@ -19,12 +19,12 @@ dotenv.config();
 
 const { Pool } = pkg;
 
-// ✅ Ensure fallback environment variables
+// Defaults
 process.env.NODE_ENV = process.env.NODE_ENV || "development";
 process.env.PORT = process.env.PORT || "5000";
 
 /* ------------------------------------------------------------
-   🧩 CONNECTION SETUP
+   Connection setup
 ------------------------------------------------------------ */
 let connectionOptions;
 
@@ -33,47 +33,53 @@ if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() !== "") {
     connectionString: process.env.DATABASE_URL.trim(),
     ssl: { rejectUnauthorized: false },
   };
-  console.log("🔌 Using hosted PostgreSQL via DATABASE_URL");
+  console.log("[DB] Using hosted PostgreSQL via DATABASE_URL");
 } else {
   connectionOptions = {
     host: process.env.PG_HOST || "localhost",
     user: process.env.PG_USER || "postgres",
     password: process.env.PG_PASS || "",
     database: process.env.PG_DB || "pjh_web",
-    port: process.env.PG_PORT || 5432,
+    port: Number(process.env.PG_PORT) || 5432,
     ssl: process.env.PG_SSL === "true" ? { rejectUnauthorized: false } : false,
   };
-  console.log("🧩 Using local PostgreSQL connection");
+  console.log("[DB] Using local PostgreSQL connection");
 }
 
 export const pool = new Pool(connectionOptions);
 
 /* ------------------------------------------------------------
-   🧠 LIFECYCLE EVENTS
+   Lifecycle events
 ------------------------------------------------------------ */
 pool.on("connect", () => {
   const host = process.env.DATABASE_URL
-    ? process.env.DATABASE_URL.split("@")[1]?.split(":")[0]?.replace("/", "") ||
-      "Render DB"
+    ? (() => {
+        try {
+          const u = new URL(process.env.DATABASE_URL);
+          return u.hostname || "hosted-db";
+        } catch {
+          return "hosted-db";
+        }
+      })()
     : process.env.PG_HOST || "localhost";
-  console.log(`📦 Connected to PostgreSQL (${host})`);
+  console.log(`[DB] Connected to PostgreSQL (${host})`);
 });
 
 pool.on("error", (err) => {
-  console.error("❌ PostgreSQL Pool Error:", err.message);
+  console.error("[DB] PostgreSQL Pool Error:", err.message);
 });
 
 /* ------------------------------------------------------------
-   🧱 SAFE MIGRATIONS (NO DATA LOSS)
+   Safe migrations (non-destructive)
 ------------------------------------------------------------ */
 export async function runMigrations() {
-  console.log("🚀 Running PostgreSQL migrations (non-destructive)...");
+  console.log("[DB] Running PostgreSQL migrations (non-destructive)...");
 
   try {
     await pool.query("BEGIN");
 
     /* ------------------------------------------------------------
-       1️⃣ Create missing tables
+       1) Create missing tables (never drops; only creates)
     ------------------------------------------------------------ */
     await pool.query(`
       CREATE TABLE IF NOT EXISTS customers (
@@ -106,7 +112,7 @@ export async function runMigrations() {
         term_months INTEGER DEFAULT 24,
         features TEXT[] DEFAULT '{}',
         discount_percent NUMERIC(5,2) DEFAULT 0,
-        visible BOOLEAN DEFAULT TRUE,
+        -- visible added explicitly via patch block below for legacy installs
         pricing_guardrails JSONB DEFAULT '{}'::jsonb,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -182,7 +188,7 @@ export async function runMigrations() {
       );
 
       /* ================================
-         🧰 Maintenance Plans & Signups
+         Maintenance Plans & Signups
          ================================ */
       CREATE TABLE IF NOT EXISTS maintenance_plans (
         id SERIAL PRIMARY KEY,
@@ -190,7 +196,7 @@ export async function runMigrations() {
         price NUMERIC(10,2) NOT NULL,
         description TEXT,
         features TEXT[] DEFAULT '{}',
-        visible BOOLEAN DEFAULT TRUE,
+        -- visible added explicitly via patch block below for legacy installs
         sort_order INT DEFAULT 100,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
@@ -213,10 +219,10 @@ export async function runMigrations() {
       );
     `);
 
-    console.log("✅ Core + maintenance tables verified/created.");
+    console.log("[DB] Core and maintenance tables verified/created.");
 
     /* ------------------------------------------------------------
-       2️⃣ Timestamp triggers (auto-update updated_at)
+       2) Timestamp triggers (auto-update updated_at)
     ------------------------------------------------------------ */
     await pool.query(`
       CREATE OR REPLACE FUNCTION update_timestamp()
@@ -229,36 +235,36 @@ export async function runMigrations() {
 
       DO $$
       BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_orders_timestamp') THEN
-          CREATE TRIGGER update_orders_timestamp
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_update_orders_timestamp') THEN
+          CREATE TRIGGER trg_update_orders_timestamp
           BEFORE UPDATE ON orders
           FOR EACH ROW
           EXECUTE FUNCTION update_timestamp();
         END IF;
 
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_customers_timestamp') THEN
-          CREATE TRIGGER update_customers_timestamp
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_update_customers_timestamp') THEN
+          CREATE TRIGGER trg_update_customers_timestamp
           BEFORE UPDATE ON customers
           FOR EACH ROW
           EXECUTE FUNCTION update_timestamp();
         END IF;
 
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_packages_timestamp') THEN
-          CREATE TRIGGER update_packages_timestamp
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_update_packages_timestamp') THEN
+          CREATE TRIGGER trg_update_packages_timestamp
           BEFORE UPDATE ON packages
           FOR EACH ROW
           EXECUTE FUNCTION update_timestamp();
         END IF;
 
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_maintenance_plans_timestamp') THEN
-          CREATE TRIGGER update_maintenance_plans_timestamp
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_update_maint_plans_timestamp') THEN
+          CREATE TRIGGER trg_update_maint_plans_timestamp
           BEFORE UPDATE ON maintenance_plans
           FOR EACH ROW
           EXECUTE FUNCTION update_timestamp();
         END IF;
 
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'update_maintenance_signups_timestamp') THEN
-          CREATE TRIGGER update_maintenance_signups_timestamp
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_update_maint_signups_timestamp') THEN
+          CREATE TRIGGER trg_update_maint_signups_timestamp
           BEFORE UPDATE ON maintenance_signups
           FOR EACH ROW
           EXECUTE FUNCTION update_timestamp();
@@ -266,10 +272,10 @@ export async function runMigrations() {
       END$$;
     `);
 
-    console.log("🕒 Timestamp triggers ensured.");
+    console.log("[DB] Timestamp triggers ensured.");
 
     /* ------------------------------------------------------------
-       3️⃣ Index optimisation
+       3) Index optimisation
     ------------------------------------------------------------ */
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
@@ -277,59 +283,68 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
 
       -- Maintenance indexes
-      CREATE INDEX IF NOT EXISTS idx_maint_plans_visible ON maintenance_plans(visible, sort_order);
+      CREATE INDEX IF NOT EXISTS idx_maint_plans_sort ON maintenance_plans(sort_order);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_status ON maintenance_signups(status, created_at);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_email ON maintenance_signups(email);
       CREATE INDEX IF NOT EXISTS idx_maint_signups_plan_id ON maintenance_signups(plan_id);
     `);
 
-    console.log("⚡ Indexes confirmed.");
+    console.log("[DB] Indexes confirmed.");
 
     /* ------------------------------------------------------------
-       4️⃣ Self-heal 'status' column in payments if missing
-    ------------------------------------------------------------ */
-    const check = await pool.query(`
-      SELECT column_name FROM information_schema.columns
-      WHERE table_name='payments' AND column_name='status';
-    `);
-    if (check.rows.length === 0) {
-      console.log("🩹 Adding missing 'status' column...");
-      await pool.query(`
-        ALTER TABLE payments
-        ADD COLUMN status VARCHAR(50) DEFAULT 'pending'
-        CHECK (status IN ('pending','paid','failed','cancelled','refunded'));
-      `);
-    }
-
-    /* ------------------------------------------------------------
-       5️⃣ Ensure 'visible' columns exist where expected
+       4) Backfill self-healing columns on legacy schemas
+          - payments.status
+          - packages.visible
+          - maintenance_plans.visible
     ------------------------------------------------------------ */
     await pool.query(`
       DO $$
       BEGIN
+        -- payments.status
         IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name='maintenance_plans' AND column_name='visible'
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='payments' AND column_name='status'
         ) THEN
-          ALTER TABLE maintenance_plans ADD COLUMN visible BOOLEAN DEFAULT TRUE;
+          ALTER TABLE payments
+          ADD COLUMN status VARCHAR(50) DEFAULT 'pending'
+          CHECK (status IN ('pending','paid','failed','cancelled','refunded'));
         END IF;
 
+        -- packages.visible
         IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
+          SELECT 1 FROM information_schema.columns
           WHERE table_name='packages' AND column_name='visible'
         ) THEN
           ALTER TABLE packages ADD COLUMN visible BOOLEAN DEFAULT TRUE;
         END IF;
+
+        -- maintenance_plans.visible
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='maintenance_plans' AND column_name='visible'
+        ) THEN
+          ALTER TABLE maintenance_plans ADD COLUMN visible BOOLEAN DEFAULT TRUE;
+        END IF;
       END$$;
     `);
 
+    console.log("[DB] Legacy column backfill ensured (status, visible).");
+
     /* ------------------------------------------------------------
-       6️⃣ Seed default data
+       5) Optional indexes that depend on backfilled columns
+    ------------------------------------------------------------ */
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_packages_visible ON packages(visible);
+      CREATE INDEX IF NOT EXISTS idx_maint_plans_visible ON maintenance_plans(visible, sort_order);
+    `);
+
+    /* ------------------------------------------------------------
+       6) Seed default data (only when empty)
     ------------------------------------------------------------ */
     const { rows: pkgCountRows } = await pool.query(
       "SELECT COUNT(*)::int AS count FROM packages;"
     );
-    if (pkgCountRows[0].count === 0) {
+    if ((pkgCountRows?.[0]?.count ?? 0) === 0) {
       const defaults = [
         {
           name: "Starter",
@@ -383,18 +398,20 @@ export async function runMigrations() {
           ]
         );
       }
-      console.log("🌱 Default website packages seeded successfully.");
+      console.log("[DB] Default website packages seeded.");
+    } else {
+      console.log(`[DB] Packages present: ${pkgCountRows[0].count} (seed skipped).`);
     }
 
     const { rows: maintCountRows } = await pool.query(
       "SELECT COUNT(*)::int AS count FROM maintenance_plans;"
     );
 
-    if (maintCountRows[0].count === 0) {
+    if ((maintCountRows?.[0]?.count ?? 0) === 0) {
       const plans = [
         {
           name: "Essential Care",
-          price: 35.0,
+          price: 45.0,
           description: "Core updates, backups, and security monitoring.",
           features: [
             "Weekly backups",
@@ -419,7 +436,7 @@ export async function runMigrations() {
         {
           name: "Total WebCare",
           price: 195.0,
-          description: "Full service for mission-critical sites with 24h support.",
+          description: "Full service for mission-critical sites with priority support.",
           features: [
             "Everything in Performance",
             "3 hrs monthly updates",
@@ -438,19 +455,21 @@ export async function runMigrations() {
           [p.name, p.price, p.description, p.features, p.sort_order]
         );
       }
-      console.log("🌱 Default maintenance plans seeded successfully.");
+      console.log("[DB] Default maintenance plans seeded.");
+    } else {
+      console.log(`[DB] Maintenance plans present: ${maintCountRows[0].count} (seed skipped).`);
     }
 
     await pool.query("COMMIT");
-    console.log("✅ Migrations completed safely — no data lost!");
+    console.log("[DB] Migrations completed safely — no data lost.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
-    console.error("❌ Migration error:", err.message);
+    console.error("[DB] Migration error:", err.message);
   }
 }
 
 /* ------------------------------------------------------------
-   🔧 UTILITIES
+   Utilities
 ------------------------------------------------------------ */
 export function generateResponseToken() {
   return crypto.randomUUID();
@@ -467,11 +486,11 @@ export async function generateQuoteNumber(customerId, businessName = "Customer")
     [customerId]
   );
 
-  const count = (rows[0]?.count || 0) + 1;
+  const count = (rows?.[0]?.count || 0) + 1;
   return `PJH-WS/${safeBusiness}/${String(count).padStart(6, "0")}`;
 }
 
 /* ------------------------------------------------------------
-   ✅ Default Export
+   Default export
 ------------------------------------------------------------ */
 export default pool;
