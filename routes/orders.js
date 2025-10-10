@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * PJH Web Services — Orders & Invoicing API (Unified 2025 Final)
+ * PJH Web Services — Orders & Invoicing API (Unified Final 2025)
  * ============================================================
  * Handles:
  *  ✅ Order lifecycle & quote conversion
@@ -60,6 +60,72 @@ router.get("/", async (_req, res) => {
 });
 
 /* ============================================================
+   🆕 POST /api/orders/from-quote/:quoteId
+   Creates a new order from an existing quote
+============================================================ */
+router.post("/from-quote/:quoteId", async (req, res) => {
+  const { quoteId } = req.params;
+
+  try {
+    // 1️⃣ Get the quote
+    const { rows: quoteRows } = await pool.query(
+      "SELECT * FROM quotes WHERE id = $1;",
+      [quoteId]
+    );
+    if (!quoteRows.length)
+      return res.status(404).json({ success: false, error: "Quote not found." });
+
+    const quote = quoteRows[0];
+
+    // 2️⃣ Prevent duplicates
+    const { rows: existing } = await pool.query(
+      "SELECT id FROM orders WHERE quote_id = $1 LIMIT 1;",
+      [quoteId]
+    );
+    if (existing.length)
+      return res.status(400).json({
+        success: false,
+        error: "Order already exists for this quote.",
+        order_id: existing[0].id,
+      });
+
+    // 3️⃣ Insert order
+    const balance =
+      Number(quote.custom_price || 0) - Number(quote.deposit || 0);
+
+    const { rows: inserted } = await pool.query(
+      `
+      INSERT INTO orders (
+        customer_id, quote_id, title, description, items, deposit, balance,
+        status, tasks, diary, deposit_paid, balance_paid
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'in_progress','[]'::jsonb,'[]'::jsonb,false,false)
+      RETURNING *;
+      `,
+      [
+        quote.customer_id,
+        quote.id,
+        quote.title,
+        quote.description || "",
+        quote.items || [],
+        quote.deposit || 0,
+        balance,
+      ]
+    );
+
+    const newOrder = inserted[0];
+    console.log(`✅ Created order ${newOrder.id} from quote ${quote.id}`);
+
+    res.json({ success: true, data: newOrder });
+  } catch (err) {
+    console.error("❌ Error creating order from quote:", err);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to create order from quote." });
+  }
+});
+
+/* ============================================================
    🔍 GET /api/orders/:id — Refund-aware totals
 ============================================================ */
 router.get("/:id", async (req, res) => {
@@ -97,23 +163,23 @@ router.get("/:id", async (req, res) => {
       [id]
     );
 
-    // 💰 Totals including refunds
     const paid = payments
       .filter((p) => p.status === "paid" && p.amount > 0)
       .reduce((sum, p) => sum + Number(p.amount), 0);
+
     const refunded = payments
       .filter((p) => p.status === "refunded" || p.amount < 0)
       .reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0);
-    const netPaid = paid - refunded;
+
     const total = Number(order.deposit || 0) + Number(order.balance || 0);
-    const balanceDue = Math.max(total - netPaid, 0);
+    const balanceDue = Math.max(total - (paid - refunded), 0);
 
     res.json({
       success: true,
       data: {
         ...order,
         payments,
-        total_paid: netPaid,
+        total_paid: paid,
         refunded_total: refunded,
         balance_due: balanceDue,
       },
@@ -230,11 +296,10 @@ router.get("/:id/refresh", async (req, res) => {
     const refunded = payments
       .filter((p) => p.status === "refunded" || p.amount < 0)
       .reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0);
-    const netPaid = paid - refunded;
 
     res.json({
       success: true,
-      data: { ...order, payments, total_paid: netPaid, refunded_total: refunded },
+      data: { ...order, payments, total_paid: paid, refunded_total: refunded },
     });
   } catch (err) {
     console.error("❌ Error refreshing order:", err);
@@ -248,13 +313,9 @@ router.get("/:id/refresh", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
   try {
-    // Start a transaction to ensure atomic cleanup
     await pool.query("BEGIN");
 
-    // Delete associated payments first
     await pool.query("DELETE FROM payments WHERE order_id = $1;", [id]);
-
-    // Delete the order itself
     const result = await pool.query("DELETE FROM orders WHERE id = $1 RETURNING *;", [id]);
 
     if (!result.rowCount) {
