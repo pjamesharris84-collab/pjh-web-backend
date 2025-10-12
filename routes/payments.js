@@ -175,4 +175,76 @@ router.post("/refund", async (req, res) => {
   }
 });
 
+/* ============================================================
+   ⚡ POST /api/payments/webhook — Stripe → backend
+============================================================ */
+import bodyParser from "body-parser";
+
+router.post(
+  "/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig,
+        process.env.STRIPE_WEBHOOK_SECRET
+      );
+    } catch (err) {
+      console.error("❌ Webhook signature failed:", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    try {
+      switch (event.type) {
+        case "checkout.session.completed": {
+          const session = event.data.object;
+          const orderId = session.metadata?.order_id;
+          const paymentType = session.metadata?.payment_type || "deposit";
+          const amount = session.amount_total / 100;
+          const method = session.payment_method_types[0];
+          const status = session.payment_status === "paid" ? "paid" : "pending";
+
+          if (orderId) {
+            await pool.query(
+              `
+              INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+              SELECT id, customer_id, $1, $2, $3, $4, $5 FROM orders WHERE id=$6;
+              `,
+              [amount, paymentType, method, status, session.payment_intent, orderId]
+            );
+
+            console.log(`💰 Payment recorded for Order #${orderId} — £${amount}`);
+          }
+          break;
+        }
+
+        case "setup_intent.succeeded": {
+          const setup = event.data.object;
+          const customer = setup.customer;
+          const mandate = setup.mandate;
+
+          await pool.query(
+            "UPDATE customers SET stripe_mandate_id=$1, direct_debit_active=true WHERE stripe_customer_id=$2;",
+            [mandate, customer]
+          );
+          console.log(`🏦 Direct Debit setup for customer ${customer}`);
+          break;
+        }
+
+        default:
+          console.log(`Unhandled event type: ${event.type}`);
+      }
+
+      res.json({ received: true });
+    } catch (err) {
+      console.error("❌ Webhook handler error:", err);
+      res.status(500).send("Webhook handler error");
+    }
+  }
+);
+
 export default router;
