@@ -72,18 +72,33 @@ router.post("/create-checkout", async (req, res) => {
           return c.id;
         }));
 
-    const baseAmount =
-      type === "deposit" ? Number(order.deposit) : Number(order.balance);
-    const { rows: pays } = await pool.query(
-      `SELECT COALESCE(SUM(amount),0)::numeric AS paid FROM payments WHERE order_id=$1 AND type=$2 AND status='paid';`,
-      [order.id, type]
-    );
-    const alreadyPaid = Number(pays[0]?.paid || 0);
-    const amount = Math.max(baseAmount - alreadyPaid, 0);
-    if (amount <= 0)
-      return res
-        .status(400)
-        .json({ success: false, error: `No outstanding ${type} amount.` });
+// 1️⃣ Get total paid and total refunded for this order + payment type
+const { rows: paymentSummary } = await pool.query(
+  `
+  SELECT
+    COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0)::numeric AS paid_total,
+    COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0)::numeric AS refunded_total
+  FROM payments
+  WHERE order_id=$1 AND type=$2;
+  `,
+  [order.id, type]
+);
+
+const paidTotal = Number(paymentSummary[0]?.paid_total || 0);
+const refundedTotal = Math.abs(Number(paymentSummary[0]?.refunded_total || 0));
+
+// 2️⃣ Compute net paid after refunds
+const netPaid = Math.max(paidTotal - refundedTotal, 0);
+
+// 3️⃣ Determine outstanding amount
+const amount = Math.max(baseAmount - netPaid, 0);
+
+if (amount <= 0) {
+  return res.status(400).json({
+    success: false,
+    error: `No outstanding ${type} amount — already paid or fully refunded.`,
+  });
+}
 
     const mode =
       flow === "bacs_setup" ? "setup" : flow === "bacs_payment" ? "payment" : "payment";
