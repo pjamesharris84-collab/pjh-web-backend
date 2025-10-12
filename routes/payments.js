@@ -138,31 +138,29 @@ router.post("/create-checkout", async (req, res) => {
       flow === "bacs_payment" || flow === "bacs_setup" ? ["bacs_debit"] : ["card"];
 
     // 7️⃣ Create Checkout Session
-    const session = await stripe.checkout.sessions.create({
-      mode,
-      customer: stripeCustomer,
-      payment_method_types,
-      line_items:
-        mode === "setup"
-          ? undefined
-          : [
-              {
-                price_data: {
-                  currency: "gbp",
-                  product_data: { name: `${type} — ${order.title}` },
-                  unit_amount: Math.round(amount * 100),
-                },
-                quantity: 1,
-              },
-            ],
-      success_url: `${FRONTEND_URL}/payment-success?order=${order.id}`,
-      cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${order.id}`,
-      metadata: {
-        order_id: String(order.id),
-        payment_type: type,        // "deposit" | "balance"
-        flow,                      // "card_payment" | "bacs_payment" | "bacs_setup"
-      },
-    });
+const session = await stripe.checkout.sessions.create({
+  mode,
+  customer: stripeCustomer,
+  payment_method_types: paymentTypes,
+  ...(mode === "setup"
+    ? {}
+    : {
+        line_items: [
+          {
+            price_data: {
+              currency: "gbp",
+              product_data: { name: `${type} — ${order.title}` },
+              unit_amount: Math.round(amount * 100),
+            },
+            quantity: 1,
+          },
+        ],
+      }),
+  success_url: `${FRONTEND_URL}/payment-success?order=${order.id}`,
+  cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${order.id}`,
+  metadata: { order_id: String(order.id), payment_type: type },
+});
+
 
     // 8️⃣ Email the link to customer
     await sendEmail({
