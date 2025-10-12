@@ -4,7 +4,7 @@
 // Handles:
 //  ✅ Express core + database migrations
 //  ✅ Secure CORS for local, Vercel, and live
-//  ✅ Stripe webhook signature-safe handling
+//  ✅ Stripe webhook signature-safe handling (Render-compatible)
 //  ✅ Static file delivery for PDFs/logos
 //  ✅ Email-powered contact form
 // ============================================================
@@ -12,6 +12,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import bodyParser from "body-parser";
 import { runMigrations } from "./db.js";
 import { sendEmail } from "./utils/email.js";
 
@@ -30,8 +31,23 @@ import maintenanceRouter from "./routes/maintenance.js";
 // ✅ Unified Stripe Checkout + Direct Debit Billing
 import paymentsRouter from "./routes/payments.js";
 
+import path from "path";
+import { fileURLToPath } from "url";
+
 dotenv.config();
 const app = express();
+
+/* ============================================================
+   ⚡ Stripe Webhook — Must be RAW, mounted BEFORE express.json()
+============================================================ */
+app.post(
+  "/api/payments/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  (req, res, next) => {
+    // Pass through to router — Stripe will verify raw body inside
+    next();
+  }
+);
 
 /* ============================================================
    🌍 CORS Configuration (Local + Live + Vercel)
@@ -55,7 +71,6 @@ const allowedOrigins = (
 app.use(
   cors({
     origin: (origin, callback) => {
-      // ✅ Allow localhost, production domains, and Vercel preview URLs
       if (
         !origin ||
         allowedOrigins.includes(origin) ||
@@ -71,7 +86,6 @@ app.use(
   })
 );
 
-// ✅ Handle preflight (OPTIONS) requests globally
 app.options("*", (req, res) => {
   res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.header(
@@ -101,6 +115,7 @@ console.table({
    🧱 Enable JSON Parsing (after webhook route)
 ============================================================ */
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 /* ============================================================
    🧱 Database Migrations
@@ -172,12 +187,8 @@ app.get("/api/payments/schedule/:id", (req, res) => {
 /* ============================================================
    🖼️ Static File Serving (PDFs, logos, etc.)
 ============================================================ */
-import path from "path";
-import { fileURLToPath } from "url";
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const publicPath = path.join(__dirname, "public");
 app.use(express.static(publicPath));
 
