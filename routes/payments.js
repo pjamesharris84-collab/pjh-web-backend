@@ -15,6 +15,7 @@ import express from "express";
 import Stripe from "stripe";
 import dotenv from "dotenv";
 import pool from "../db.js";
+import bodyParser from "body-parser";
 import { sendEmail } from "../utils/email.js";
 import {
   paymentRequestTemplate,
@@ -34,6 +35,7 @@ const FRONTEND_URL =
 
 /* ============================================================
    💳 POST /api/payments/create-checkout
+   Creates Stripe Checkout for deposit, balance, or direct debit
 ============================================================ */
 router.post("/create-checkout", async (req, res) => {
   try {
@@ -41,6 +43,7 @@ router.post("/create-checkout", async (req, res) => {
     if (!orderId)
       return res.status(400).json({ success: false, error: "Missing orderId" });
 
+    // 1️⃣ Fetch order + customer
     const { rows } = await pool.query(
       `
       SELECT o.*, c.id AS cid, c.name AS customer_name, c.email,
@@ -56,6 +59,8 @@ router.post("/create-checkout", async (req, res) => {
       return res.status(404).json({ success: false, error: "Order not found" });
 
     const order = rows[0];
+
+    // 2️⃣ Ensure Stripe customer exists
     const stripeCustomer =
       order.stripe_customer_id ||
       (await stripe.customers
@@ -72,34 +77,35 @@ router.post("/create-checkout", async (req, res) => {
           return c.id;
         }));
 
-// 1️⃣ Get total paid and total refunded for this order + payment type
-const { rows: paymentSummary } = await pool.query(
-  `
-  SELECT
-    COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0)::numeric AS paid_total,
-    COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0)::numeric AS refunded_total
-  FROM payments
-  WHERE order_id=$1 AND type=$2;
-  `,
-  [order.id, type]
-);
+    // 3️⃣ Determine base amount
+    const baseAmount =
+      type === "deposit" ? Number(order.deposit || 0) : Number(order.balance || 0);
 
-const paidTotal = Number(paymentSummary[0]?.paid_total || 0);
-const refundedTotal = Math.abs(Number(paymentSummary[0]?.refunded_total || 0));
+    // 4️⃣ Calculate paid and refunded totals
+    const { rows: paymentSummary } = await pool.query(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0)::numeric AS paid_total,
+        COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0)::numeric AS refunded_total
+      FROM payments
+      WHERE order_id=$1 AND type=$2;
+      `,
+      [order.id, type]
+    );
 
-// 2️⃣ Compute net paid after refunds
-const netPaid = Math.max(paidTotal - refundedTotal, 0);
+    const paidTotal = Number(paymentSummary[0]?.paid_total || 0);
+    const refundedTotal = Math.abs(Number(paymentSummary[0]?.refunded_total || 0));
+    const netPaid = Math.max(paidTotal - refundedTotal, 0);
+    const amount = Math.max(baseAmount - netPaid, 0);
 
-// 3️⃣ Determine outstanding amount
-const amount = Math.max(baseAmount - netPaid, 0);
+    if (amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: `No outstanding ${type} amount — already paid or fully refunded.`,
+      });
+    }
 
-if (amount <= 0) {
-  return res.status(400).json({
-    success: false,
-    error: `No outstanding ${type} amount — already paid or fully refunded.`,
-  });
-}
-
+    // 5️⃣ Determine payment mode + method
     const mode =
       flow === "bacs_setup" ? "setup" : flow === "bacs_payment" ? "payment" : "payment";
     const paymentTypes =
@@ -107,6 +113,7 @@ if (amount <= 0) {
         ? ["bacs_debit"]
         : ["card"];
 
+    // 6️⃣ Create Checkout Session
     const session = await stripe.checkout.sessions.create({
       mode,
       customer: stripeCustomer,
@@ -126,9 +133,14 @@ if (amount <= 0) {
             ],
       success_url: `${FRONTEND_URL}/payment-success?order=${order.id}`,
       cancel_url: `${FRONTEND_URL}/payment-cancelled?order=${order.id}`,
-      metadata: { order_id: String(order.id), payment_type: type },
+      metadata: {
+        order_id: String(order.id),
+        payment_type: type,
+        recharge: refundedTotal > 0 ? "true" : "false",
+      },
     });
 
+    // 7️⃣ Send payment email
     await sendEmail({
       to: order.email,
       subject: `Secure ${type} payment — ${order.title}`,
@@ -141,6 +153,10 @@ if (amount <= 0) {
       }),
     });
 
+    console.log(
+      `💳 Checkout created for Order #${order.id} (${type}) — £${amount.toFixed(2)}`
+    );
+
     res.json({ success: true, url: session.url });
   } catch (err) {
     console.error("❌ create-checkout error:", err);
@@ -150,6 +166,7 @@ if (amount <= 0) {
 
 /* ============================================================
    💸 POST /api/payments/refund
+   Creates Stripe refund + records in DB
 ============================================================ */
 router.post("/refund", async (req, res) => {
   const { payment_id, amount } = req.body;
@@ -193,8 +210,6 @@ router.post("/refund", async (req, res) => {
 /* ============================================================
    ⚡ POST /api/payments/webhook — Stripe → backend
 ============================================================ */
-import bodyParser from "body-parser";
-
 router.post(
   "/webhook",
   bodyParser.raw({ type: "application/json" }),
