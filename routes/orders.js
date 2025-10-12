@@ -129,6 +129,10 @@ router.post("/from-quote/:quoteId", async (req, res) => {
     const newOrder = inserted[0];
     console.log(`✅ Created order ${newOrder.id} from quote ${quote.id}`);
 
+    // 6️⃣ Update quote status → closed
+    await pool.query("UPDATE quotes SET status = 'closed' WHERE id = $1;", [quoteId]);
+    console.log(`🔒 Quote ${quoteId} marked as closed.`);
+
     res.json({ success: true, data: newOrder });
   } catch (err) {
     console.error("❌ Error creating order from quote:", err);
@@ -137,6 +141,7 @@ router.post("/from-quote/:quoteId", async (req, res) => {
       .json({ success: false, error: "Failed to create order from quote." });
   }
 });
+
 
 /* ============================================================
    🔍 GET /api/orders/:id — Refund-aware totals
