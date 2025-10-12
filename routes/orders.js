@@ -99,7 +99,7 @@ router.post("/from-quote/:quoteId", async (req, res) => {
       console.warn("⚠️ Quote items could not be parsed; defaulting to []");
       items = [];
     }
-    
+
     // 4️⃣ Calculate financials (robust to missing fields)
 const deposit = Number(quote.deposit || 0);
 
@@ -134,8 +134,9 @@ const balance = Math.max(total - deposit, 0);
       ]
     );
 
-    const newOrder = inserted[0];
-    console.log(`✅ Created order ${newOrder.id} from quote ${quote.id}`);
+//  Link quote → order
+await pool.query("UPDATE quotes SET order_id = $1 WHERE id = $2;", [newOrder.id, quote.id]);
+
 
     // 6️⃣ Update quote status → closed
     await pool.query("UPDATE quotes SET status = 'closed' WHERE id = $1;", [quoteId]);
@@ -197,19 +198,25 @@ router.get("/:id", async (req, res) => {
       .filter((p) => p.status === "refunded" || p.amount < 0)
       .reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0);
 
-    const total = Number(order.deposit || 0) + Number(order.balance || 0);
-    const balanceDue = Math.max(total - (paid - refunded), 0);
+    //  Calculate full totals (robust)
+const total = Number(order.deposit || 0) + Number(order.balance || 0);
+const paidTotal = paid;
+const refundedTotal = refunded;
+const balanceDue = Math.max(total - (paidTotal - refundedTotal), 0);
 
-    res.json({
-      success: true,
-      data: {
-        ...order,
-        payments,
-        total_paid: paid,
-        refunded_total: refunded,
-        balance_due: balanceDue,
-      },
-    });
+//  Return explicit totals for the frontend
+res.json({
+  success: true,
+  data: {
+    ...order,
+    payments,
+    total,
+    total_paid: paidTotal,
+    refunded_total: refundedTotal,
+    balance_due: balanceDue,
+  },
+});
+
   } catch (err) {
     console.error("❌ Error fetching order:", err);
     res.status(500).json({ success: false, error: "Failed to fetch order." });
