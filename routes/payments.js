@@ -78,8 +78,10 @@ router.post("/create-checkout", async (req, res) => {
         }));
 
     // 3️⃣ Determine base amount
-    const baseAmount =
-      type === "deposit" ? Number(order.deposit || 0) : Number(order.balance || 0);
+const baseAmount =
+  req.body.amount ??
+  (type === "deposit" ? Number(order.deposit) : Number(order.balance));
+
 
     // 4️⃣ Calculate paid and refunded totals
 const { rows: paymentSummary } = await pool.query(
