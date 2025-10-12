@@ -82,16 +82,18 @@ router.post("/create-checkout", async (req, res) => {
       type === "deposit" ? Number(order.deposit || 0) : Number(order.balance || 0);
 
     // 4️⃣ Calculate paid and refunded totals
-    const { rows: paymentSummary } = await pool.query(
-      `
-      SELECT
-        COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0)::numeric AS paid_total,
-        COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0)::numeric AS refunded_total
-      FROM payments
-      WHERE order_id=$1 AND type=$2;
-      `,
-      [order.id, type]
-    );
+const { rows: paymentSummary } = await pool.query(
+  `
+  SELECT
+    COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0)::numeric AS paid_total,
+    COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0)::numeric AS refunded_total
+  FROM payments
+  WHERE order_id=$1
+    AND (type=$2 OR type='refund');
+  `,
+  [order.id, type]
+);
+
 
     const paidTotal = parseFloat(paymentSummary[0]?.paid_total) || 0;
 const refundedTotal = Math.abs(parseFloat(paymentSummary[0]?.refunded_total) || 0);
