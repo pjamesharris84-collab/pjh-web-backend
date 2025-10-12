@@ -99,11 +99,19 @@ router.post("/from-quote/:quoteId", async (req, res) => {
       console.warn("⚠️ Quote items could not be parsed; defaulting to []");
       items = [];
     }
+    
+    // 4️⃣ Calculate financials (robust to missing fields)
+const deposit = Number(quote.deposit || 0);
 
-    // 4️⃣ Calculate financials
-    const deposit = Number(quote.deposit || 0);
-    const total = Number(quote.custom_price || quote.total_after_discount || 0);
-    const balance = Math.max(total - deposit, 0);
+// Ensure total always reflects full package + maintenance
+const total =
+  Number(quote.custom_price) ||
+  Number(quote.total_after_discount) ||
+  deposit * 2 || // fallback if quote uses 50% deposit logic
+  0;
+
+const balance = Math.max(total - deposit, 0);
+
 
     // 5️⃣ Insert order (force valid JSONB)
     const { rows: inserted } = await pool.query(
