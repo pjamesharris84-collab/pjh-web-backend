@@ -93,17 +93,29 @@ router.post("/create-checkout", async (req, res) => {
       [order.id, type]
     );
 
-    const paidTotal = Number(paymentSummary[0]?.paid_total || 0);
-    const refundedTotal = Math.abs(Number(paymentSummary[0]?.refunded_total || 0));
-    const netPaid = Math.max(paidTotal - refundedTotal, 0);
-    const amount = Math.max(baseAmount - netPaid, 0);
+    const paidTotal = parseFloat(paymentSummary[0]?.paid_total) || 0;
+const refundedTotal = Math.abs(parseFloat(paymentSummary[0]?.refunded_total) || 0);
 
-    if (amount <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: `No outstanding ${type} amount — already paid or fully refunded.`,
-      });
-    }
+// Net paid after refunds (never negative)
+const netPaid = paidTotal - refundedTotal;
+const amount = baseAmount - netPaid;
+
+console.log({
+  baseAmount,
+  paidTotal,
+  refundedTotal,
+  netPaid,
+  amount,
+  type,
+});
+
+if (amount <= 0) {
+  return res.status(400).json({
+    success: false,
+    error: `No outstanding ${type} amount — already paid or fully refunded.`,
+  });
+}
+
 
     // 5️⃣ Determine payment mode + method
     const mode =
