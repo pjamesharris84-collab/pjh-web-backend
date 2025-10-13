@@ -47,7 +47,6 @@ const app = express();
    ⚡ Stripe Webhook — Must be mounted BEFORE express.json()
    (Raw body preserved for Stripe signature verification)
 ============================================================ */
-import billingRouter from "./routes/billing.js";
 
 app.use(
   "/api/billing/webhook",
