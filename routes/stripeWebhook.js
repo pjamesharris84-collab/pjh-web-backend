@@ -1,197 +1,77 @@
-// ============================================
-// PJH Web Services — Stripe Webhook Handler
-// ============================================
-
+// routes/stripeWebhook.js
 import express from "express";
 import Stripe from "stripe";
+import pool from "../db.js";
 import dotenv from "dotenv";
-import { pool } from "../db.js";
-import { sendEmail } from "../utils/email.js";
-import { LOGO_BASE64 } from "../utils/emailLogo.js";
 
 dotenv.config();
 const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-/**
- * Stripe requires express.raw() for signature verification.
- * Mounted in index.js before JSON middleware.
- */
-router.post("/webhook", async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-  let event;
-
-  try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
-    console.error("❌ Webhook signature verification failed:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // 🎯 Process successful checkout sessions
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    console.log("✅ Stripe checkout completed:", session.id);
+router.post(
+  "/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    } catch (err) {
+      console.error("⚠️ Webhook signature verification failed:", err.message);
+      return res.sendStatus(400);
+    }
 
     try {
-      const orderId = Number(session.metadata?.orderId);
-      const paymentType = session.metadata?.paymentType || "full";
-      if (!orderId) {
-        console.warn("⚠️ No orderId in session metadata — skipping.");
-        return res.json({ received: true });
+      if (event.type === "invoice.paid") {
+        const invoice = event.data.object;
+
+        const stripeCustomerId = invoice.customer;
+        const amountPaid = invoice.amount_paid / 100; // pence → pounds
+        const invoiceId = invoice.id;
+
+        // Try to get identifiers from subscription metadata
+        // (preferred – we set this in /billing/checkout)
+        let pjh_customer_id = invoice?.subscription_details?.metadata?.pjh_customer_id;
+        let pjh_order_id = invoice?.subscription_details?.metadata?.pjh_order_id;
+
+        // Fallback: fetch subscription to read metadata
+        if (!pjh_customer_id || !pjh_order_id) {
+          const sub = await stripe.subscriptions.retrieve(invoice.subscription);
+          pjh_customer_id = sub?.metadata?.pjh_customer_id;
+          pjh_order_id = sub?.metadata?.pjh_order_id;
+        }
+
+        // Final fallback: map Stripe customer → our customer
+        if (!pjh_customer_id) {
+          const { rows: cRows } = await pool.query(
+            "SELECT id FROM customers WHERE stripe_customer_id=$1 LIMIT 1",
+            [stripeCustomerId]
+          );
+          pjh_customer_id = cRows[0]?.id;
+        }
+
+        // Record payment
+        await pool.query(
+          `
+          INSERT INTO payments
+            (order_id, customer_id, amount, type, method, status, reference, stripe_status, created_at)
+          VALUES
+            ($1, $2, $3, 'monthly', 'stripe', 'paid', $4, $5, NOW())
+          ON CONFLICT DO NOTHING;
+          `,
+          [pjh_order_id || null, pjh_customer_id || null, amountPaid, invoiceId, invoice.status]
+        );
+
+        console.log(`✅ Recorded monthly payment £${amountPaid} for order ${pjh_order_id}`);
       }
 
-      const paidAmount = Number(session.amount_total || 0) / 100;
-      const paymentIntentId = session.payment_intent || "unknown_intent";
-
-      // 💾 Record payment
-      await pool.query(
-        `INSERT INTO payments (order_id, amount, type, method, reference)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [orderId, paidAmount, paymentType, "card", paymentIntentId]
-      );
-
-      // 🧮 Update order totals
-      const { rows: orderRows } = await pool.query(
-        "SELECT * FROM orders WHERE id=$1",
-        [orderId]
-      );
-      if (!orderRows.length) return res.json({ received: true });
-      const order = orderRows[0];
-
-      const { rows: payments } = await pool.query(
-        "SELECT amount FROM payments WHERE order_id=$1",
-        [orderId]
-      );
-      const paid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
-      const total = Number(order.deposit || 0) + Number(order.balance || 0);
-      const outstanding = Math.max(0, total - paid);
-
-      // Update outstanding balance
-      await pool.query("UPDATE orders SET balance=$1 WHERE id=$2", [
-        outstanding,
-        orderId,
-      ]);
-
-      // 🔍 Get customer info
-      const { rows: custRows } = await pool.query(
-        "SELECT name, email, business FROM customers WHERE id=$1",
-        [order.customer_id]
-      );
-      const customer = custRows[0] || {};
-
-      // 💌 Build & send receipt
-      const receiptHtml = paymentReceiptTemplate({
-        customerName: customer.name,
-        orderId,
-        orderTitle: order.title,
-        paidAmount,
-        total,
-        paid,
-        outstanding,
-        type: paymentType,
-      });
-
-      await sendEmail({
-        to: customer.email || process.env.TO_EMAIL || process.env.SMTP_USER,
-        subject: `Payment Receipt — ${order.title}`,
-        html: receiptHtml,
-      });
-
-      // 🧾 Notify admin (optional)
-      if (process.env.NOTIFY_ADMIN_ON_PAYMENT === "true") {
-        await sendEmail({
-          to: process.env.TO_EMAIL || process.env.SMTP_USER,
-          subject: `Payment received — ${order.title}`,
-          text: `£${paidAmount.toFixed(2)} received for Order #${orderId}.
-Customer: ${customer.name || "Unknown"} (${customer.email || "no email"})
-Outstanding now: £${outstanding.toFixed(2)}.`,
-        });
-      }
-
-      console.log(`💰 Payment recorded for Order #${orderId}: £${paidAmount}`);
+      res.json({ received: true });
     } catch (err) {
-      console.error("❌ Error handling checkout.session.completed:", err);
+      console.error("❌ Webhook handling error:", err.message);
+      res.status(500).json({ error: "Webhook processing failed" });
     }
   }
-
-  // ✅ Always 200 to prevent Stripe retries
-  return res.json({ received: true });
-});
+);
 
 export default router;
-
-/* =======================================================
-   HTML Email Template: Payment Receipt
-   ======================================================= */
-function paymentReceiptTemplate({
-  customerName,
-  orderTitle,
-  paidAmount,
-  total,
-  paid,
-  outstanding,
-  type,
-}) {
-  return `
-  <html>
-    <body style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;background-color:#f4f6f8;padding:40px;margin:0;">
-      <table width="100%" style="max-width:600px;margin:auto;background:#fff;border-radius:12px;box-shadow:0 4px 15px rgba(0,0,0,0.08);overflow:hidden;">
-        <tr>
-          <td style="background:#0d1117;text-align:center;padding:20px;">
-            <img src="${LOGO_BASE64}" alt="PJH Web Services" width="120" style="display:block;margin:auto;max-width:120px;height:auto;">
-            <h2 style="color:#58a6ff;margin:10px 0 0;">Payment Receipt</h2>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:30px;">
-            <p style="color:#333;">Hi ${customerName || "Customer"},</p>
-            <p style="color:#333;line-height:1.6;">
-              Thank you for your <strong>${type}</strong> payment of <strong>£${paidAmount.toFixed(
-    2
-  )}</strong> for your order <strong>${orderTitle}</strong>.
-            </p>
-            <table style="width:100%;border-collapse:collapse;margin:20px 0;">
-              <tr style="background:#f0f3f6;">
-                <td style="padding:10px 15px;">Total Order Value</td>
-                <td style="padding:10px 15px;text-align:right;">£${total.toFixed(
-                  2
-                )}</td>
-              </tr>
-              <tr>
-                <td style="padding:10px 15px;">Total Paid to Date</td>
-                <td style="padding:10px 15px;text-align:right;">£${paid.toFixed(
-                  2
-                )}</td>
-              </tr>
-              <tr style="background:#f0f3f6;">
-                <td style="padding:10px 15px;">Outstanding Balance</td>
-                <td style="padding:10px 15px;text-align:right;font-weight:600;">£${outstanding.toFixed(
-                  2
-                )}</td>
-              </tr>
-            </table>
-            <p style="color:#666;font-size:14px;line-height:1.5;">
-              Your payment has been securely processed via Stripe.
-              You'll receive updates as your project progresses.
-            </p>
-            <p style="color:#777;font-size:13px;margin-top:30px;">
-              Kind regards,<br>
-              <strong>PJH Web Services</strong><br>
-              <a href="https://www.pjhwebservices.co.uk" style="color:#007bff;text-decoration:none;">www.pjhwebservices.co.uk</a>
-            </p>
-          </td>
-        </tr>
-        <tr>
-          <td style="background:#0d1117;color:#999;text-align:center;font-size:12px;padding:10px;">
-            © ${new Date().getFullYear()} PJH Web Services — All Rights Reserved
-          </td>
-        </tr>
-      </table>
-    </body>
-  </html>`;
-}

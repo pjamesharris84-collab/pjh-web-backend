@@ -30,9 +30,11 @@ import orderDiaryRoutes from "./routes/orderDiary.js";
 import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 import packagesRouter from "./routes/packages.js";
 import maintenanceRouter from "./routes/maintenance.js";
+import stripeWebhookRouter from "./routes/stripeWebhook.js";
 
 // ✅ Unified Stripe + Direct Debit Billing
 import paymentsRouter from "./routes/payments.js";
+import billingRouter from "./routes/billing.js";
 
 // ✅ Recurring Billing Automation
 import automationRouter from "./routes/automation/index.js";
@@ -169,6 +171,8 @@ app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
 app.use("/api/packages", packagesRouter);
 app.use("/api/maintenance", maintenanceRouter);
+app.use("/api/billing", billingRouter);
+app.use("/api/stripe", stripeWebhookRouter); // before app.use(express.json())
 
 // ✅ Dedicated Order Diary
 app.use("/api/diary", orderDiaryRoutes);
