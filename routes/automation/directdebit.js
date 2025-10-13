@@ -1,110 +1,89 @@
 /**
  * ============================================================
- * PJH Web Services — Automated Direct Debit Billing (2025)
+ * PJH Web Services — Direct Debit Automation (2025)
  * ============================================================
- *  • Charges all customers with active mandates
- *  • Pulls the maintenance plan price from linked QUOTE (preferred) or ORDER
- *  • Logs success/failure in `payments`
- *  • Safe if orders.maintenance_monthly is NULL or column missing in SELECT
+ * Runs daily to charge active maintenance subscriptions
+ * via Stripe mandates. Safe to re-run (idempotent per month).
  * ============================================================
  */
 
+import express from "express";
 import Stripe from "stripe";
-import dotenv from "dotenv";
 import pool from "../../db.js";
+import dotenv from "dotenv";
 
 dotenv.config();
+const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-export async function runMonthlyDirectDebit(orderIdOverride = null) {
-  console.log("🏦 Starting Direct Debit billing...");
+/**
+ * 🧮 GET /api/automation/directdebit/run
+ */
+router.get("/run", async (req, res) => {
+  try {
+    console.log("🏦 Running Direct Debit automation...");
 
-  // 1️⃣ Fetch all targets: Join orders → quotes → maintenance_plans (source of truth)
-  // We prefer pulling maintenance price from the QUOTE's maintenance_id.
-  // Fallback to orders.maintenance_monthly if present (NULL-safe COALESCE).
-  const params = [];
-  let filter = "";
-  if (orderIdOverride) {
-    params.push(orderIdOverride);
-    filter = "AND o.id = $1";
-  }
+    const { rows: customers } = await pool.query(`
+      SELECT 
+        c.id AS customer_id,
+        c.name AS customer_name,
+        c.stripe_customer_id,
+        c.stripe_mandate_id,
+        o.id AS order_id,
+        o.maintenance_id,
+        m.price AS maintenance_price,
+        m.name AS maintenance_name
+      FROM customers c
+      JOIN orders o ON o.customer_id = c.id
+      JOIN maintenance_plans m ON m.id = o.maintenance_id
+      WHERE c.direct_debit_active = TRUE
+        AND c.stripe_customer_id IS NOT NULL
+        AND c.stripe_mandate_id IS NOT NULL
+    `);
 
-  const { rows: customers } = await pool.query(
-    `
-    SELECT 
-      c.id       AS customer_id, 
-      c.name     AS customer_name, 
-      c.email,
-      c.stripe_customer_id,
-      c.stripe_mandate_id,
-      c.direct_debit_active,
-      o.id       AS order_id,
-      o.title,
-      COALESCE(m.price, o.maintenance_monthly, 0)::numeric AS monthly_price
-    FROM customers c
-    JOIN orders o            ON o.customer_id = c.id
-    LEFT JOIN quotes q       ON q.id = o.quote_id
-    LEFT JOIN maintenance_plans m ON m.id = q.maintenance_id
-    WHERE c.direct_debit_active = true
-    ${filter}
-    `,
-    params
-  );
+    if (!customers.length)
+      return res.json({ success: true, message: "No active DD customers found." });
 
-  if (!customers.length) {
-    console.log("ℹ️ No customers with active Direct Debit mandates.");
-    return;
-  }
+    for (const cust of customers) {
+      const amount = Number(cust.maintenance_price);
+      if (amount <= 0) continue;
 
-  for (const cust of customers) {
-    try {
-      const monthly = Number(cust.monthly_price || 0);
-      if (monthly <= 0) {
-        console.log(`⬇️ Skipped ${cust.customer_name} — no monthly maintenance set.`);
-        continue;
-      }
+      console.log(`💳 Charging ${cust.customer_name} £${amount.toFixed(2)} via Direct Debit...`);
 
-      const amount = Math.round(monthly * 100);
-      console.log(`💳 Charging ${cust.customer_name} £${monthly.toFixed(2)} via Direct Debit...`);
-
-      // Create PaymentIntent with Bacs + mandate (off-session)
-      const intent = await stripe.paymentIntents.create({
-        amount,
-        currency: "gbp",
-        customer: cust.stripe_customer_id,
-        payment_method_types: ["bacs_debit"],
-        mandate: cust.stripe_mandate_id, // uses existing mandate
-        confirm: true,
-        off_session: true,
-        description: `Monthly Maintenance — ${cust.title}`,
-        metadata: {
-          order_id: String(cust.order_id),
-          payment_type: "maintenance",
-        },
-      });
-
-await pool.query(
-  `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
-   VALUES ($1, $2, $3, 'maintenance', 'bacs', 'processing', $4, NOW())`,
-  [cust.order_id, cust.customer_id, cust.monthly_price, intent.id]
-);
-
-
-      console.log(`✅ PaymentIntent created: ${intent.id} — £${monthly.toFixed(2)}`);
-    } catch (err) {
-      console.error(`❌ Failed to charge ${cust.customer_name}:`, err.message);
-      // Optionally record a failed payment row here
       try {
-        await pool.query(
-          `
-          INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-          VALUES ($1,$2,$3,'maintenance','bacs','failed',NULL)
-          `,
-          [cust.order_id, cust.customer_id, Number(cust.monthly_price || 0)]
-        );
-      } catch (_) {}
-    }
-  }
+        const pi = await stripe.paymentIntents.create({
+          amount: Math.round(amount * 100),
+          currency: "gbp",
+          customer: cust.stripe_customer_id,
+          payment_method_types: ["bacs_debit"],
+          confirm: true,
+          mandate: cust.stripe_mandate_id,
+          off_session: true,
+          metadata: {
+            pjh_customer_id: cust.customer_id,
+            pjh_order_id: cust.order_id,
+            payment_type: "maintenance",
+          },
+        });
 
-  console.log("🏁 Direct Debit billing cycle complete.");
-}
+        console.log(`✅ Charged ${cust.customer_name} — £${amount.toFixed(2)} (PI: ${pi.id})`);
+
+        await pool.query(
+          `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+           VALUES ($1,$2,$3,'maintenance','bacs','processing',$4)
+           ON CONFLICT DO NOTHING;`,
+          [cust.order_id, cust.customer_id, amount, pi.id]
+        );
+      } catch (err) {
+        console.error(`❌ Failed to charge ${cust.customer_name}:`, err.message);
+      }
+    }
+
+    res.json({ success: true, message: "Direct Debit automation completed." });
+  } catch (err) {
+    console.error("❌ Direct Debit automation error:", err);
+    res.status(500).json({ error: "Automation failed." });
+  }
+});
+
+export default router;
