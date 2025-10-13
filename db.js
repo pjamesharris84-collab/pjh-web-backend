@@ -1,12 +1,14 @@
 /**
  * ============================================================
- * PJH Web Services — Database Setup & Migrations (2025 Stable)
+ * PJH Web Services — Database Setup & Migrations (2025-10)
  * ============================================================
- * Handles:
- *   • Safe migrations with no data loss
- *   • Auto column/constraint repair (plan_id, visible)
- *   • Default package + maintenance plan seeding
- *   • Timestamp triggers + indexing
+ * Non-destructive, idempotent migrations for PostgreSQL.
+ * Ensures:
+ *   • All core tables exist (customers, packages, quotes, orders, payments)
+ *   • New columns: packages.description, packages.pricing_guardrails
+ *   • quotes.maintenance_id, orders.maintenance_name/_monthly
+ *   • Timestamp triggers, helpful indexes
+ *   • Default seed data (packages, maintenance plans) if empty
  * ============================================================
  */
 
@@ -18,7 +20,7 @@ dotenv.config();
 const { Pool } = pkg;
 
 /* ------------------------------------------------------------
-   Connection Setup
+   Connection Setup (Hosted or Local)
 ------------------------------------------------------------ */
 let connectionOptions;
 
@@ -46,7 +48,7 @@ pool.on("connect", () => console.log("[DB] Connected to PostgreSQL"));
 pool.on("error", (err) => console.error("[DB] Pool Error:", err.message));
 
 /* ------------------------------------------------------------
-   Main Migration Logic
+   Main Migration Logic (Idempotent / Non-Destructive)
 ------------------------------------------------------------ */
 export async function runMigrations() {
   console.log("[DB] Running PostgreSQL migrations (non-destructive)…");
@@ -83,13 +85,14 @@ export async function runMigrations() {
         id SERIAL PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
         tagline VARCHAR(255),
+        description TEXT,                                  -- ✅ new (fixes 500)
         price_oneoff NUMERIC(10,2) NOT NULL,
         price_monthly NUMERIC(10,2),
         term_months INTEGER DEFAULT 24,
         features TEXT[] DEFAULT '{}',
         discount_percent NUMERIC(5,2) DEFAULT 0,
         visible BOOLEAN DEFAULT TRUE,
-        pricing_guardrails JSONB DEFAULT '{}'::jsonb,
+        pricing_guardrails JSONB DEFAULT '{}'::jsonb,      -- ✅ guardrails support
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       );
@@ -98,6 +101,7 @@ export async function runMigrations() {
         id SERIAL PRIMARY KEY,
         customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
         package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,
+        maintenance_id INTEGER,                             -- ✅ link to maintenance_plans
         quote_number VARCHAR(255) UNIQUE,
         title VARCHAR(255) NOT NULL,
         description TEXT,
@@ -128,15 +132,20 @@ export async function runMigrations() {
         deposit NUMERIC(10,2) DEFAULT 0,
         balance NUMERIC(10,2) DEFAULT 0,
         diary JSONB NOT NULL DEFAULT '[]'::jsonb,
+        -- Invoicing / payment flags
         deposit_invoiced BOOLEAN DEFAULT false,
         balance_invoiced BOOLEAN DEFAULT false,
         deposit_paid BOOLEAN DEFAULT false,
         balance_paid BOOLEAN DEFAULT false,
         total_paid NUMERIC(10,2) DEFAULT 0,
+        -- Recurring (legacy support)
         recurring BOOLEAN DEFAULT false,
         recurring_amount NUMERIC(10,2),
         recurring_interval VARCHAR(20) DEFAULT 'monthly',
         recurring_active BOOLEAN DEFAULT false,
+        -- ✅ Maintenance snapshot on order
+        maintenance_name VARCHAR(120),
+        maintenance_monthly NUMERIC(10,2),
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       );
@@ -197,12 +206,52 @@ export async function runMigrations() {
     console.log("[DB] Core tables verified/created.");
 
     /* ============================================================
-       2️⃣  Backfill / Patch Legacy Schemas
+       2️⃣  Column Backfills / Patching (Safe IF NOT EXISTS)
     ============================================================ */
     await pool.query(`
       DO $$
       BEGIN
-        -- packages.visible
+        -- packages.description
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='packages' AND column_name='description'
+        ) THEN
+          ALTER TABLE packages ADD COLUMN description TEXT;
+        END IF;
+
+        -- packages.pricing_guardrails
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='packages' AND column_name='pricing_guardrails'
+        ) THEN
+          ALTER TABLE packages ADD COLUMN pricing_guardrails JSONB DEFAULT '{}'::jsonb;
+        END IF;
+
+        -- quotes.maintenance_id
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='quotes' AND column_name='maintenance_id'
+        ) THEN
+          ALTER TABLE quotes ADD COLUMN maintenance_id INTEGER;
+        END IF;
+
+        -- orders.maintenance_name
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='orders' AND column_name='maintenance_name'
+        ) THEN
+          ALTER TABLE orders ADD COLUMN maintenance_name VARCHAR(120);
+        END IF;
+
+        -- orders.maintenance_monthly
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_name='orders' AND column_name='maintenance_monthly'
+        ) THEN
+          ALTER TABLE orders ADD COLUMN maintenance_monthly NUMERIC(10,2);
+        END IF;
+
+        -- packages.visible (legacy)
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='packages' AND column_name='visible'
@@ -210,28 +259,17 @@ export async function runMigrations() {
           ALTER TABLE packages ADD COLUMN visible BOOLEAN DEFAULT TRUE;
         END IF;
 
-        -- maintenance_plans.visible
+        -- maintenance_plans.visible (legacy)
         IF NOT EXISTS (
           SELECT 1 FROM information_schema.columns
           WHERE table_name='maintenance_plans' AND column_name='visible'
         ) THEN
           ALTER TABLE maintenance_plans ADD COLUMN visible BOOLEAN DEFAULT TRUE;
         END IF;
-
-        -- maintenance_signups.plan_id
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='maintenance_signups' AND column_name='plan_id'
-        ) THEN
-          ALTER TABLE maintenance_signups ADD COLUMN plan_id INT;
-          ALTER TABLE maintenance_signups
-            ADD CONSTRAINT maintenance_signups_plan_id_fkey
-            FOREIGN KEY (plan_id) REFERENCES maintenance_plans(id) ON DELETE SET NULL;
-        END IF;
       END$$;
     `);
 
-    console.log("[DB] Legacy column patching done.");
+    console.log("[DB] Legacy/patch columns ensured.");
 
     /* ============================================================
        3️⃣  Timestamp Triggers
@@ -271,9 +309,9 @@ export async function runMigrations() {
           FOR EACH ROW EXECUTE FUNCTION update_timestamp();
         END IF;
 
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_update_maint_signups_timestamp') THEN
-          CREATE TRIGGER trg_update_maint_signups_timestamp
-          BEFORE UPDATE ON maintenance_signups
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_update_quotes_timestamp') THEN
+          CREATE TRIGGER trg_update_quotes_timestamp
+          BEFORE UPDATE ON quotes
           FOR EACH ROW EXECUTE FUNCTION update_timestamp();
         END IF;
       END$$;
@@ -287,99 +325,166 @@ export async function runMigrations() {
       CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
       CREATE INDEX IF NOT EXISTS idx_packages_visible ON packages(visible);
       CREATE INDEX IF NOT EXISTS idx_maint_plans_visible ON maintenance_plans(visible, sort_order);
-      CREATE INDEX IF NOT EXISTS idx_maint_signups_plan_id ON maintenance_signups(plan_id);
+      CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(status);
+      CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
     `);
 
     console.log("[DB] Indexes ensured.");
 
     /* ============================================================
-       5️⃣  Default Data Seeding (if empty)
+       5️⃣  Default Data Seeding (Only If Empty)
     ============================================================ */
-    const { rows: pkgRows } = await pool.query("SELECT COUNT(*)::int AS c FROM packages;");
-    if ((pkgRows?.[0]?.c ?? 0) === 0) {
-      const defaults = [
+
+    // Packages
+    const { rows: pkgCountRows } = await pool.query(
+      "SELECT COUNT(*)::int AS c FROM packages;"
+    );
+    if ((pkgCountRows?.[0]?.c ?? 0) === 0) {
+      const guardrailsDefault = {
+        require_deposit_months: 1,
+        min_term_months: 24,
+        early_exit_fee_pct: 35,
+        ownership_until_paid: true,
+        late_fee_pct: 5,
+        default_payment_method: "direct_debit",
+        tcs_version: "2025-10",
+      };
+
+      const packagesSeed = [
         {
           name: "Starter",
-          tagline: "Perfect for small business websites",
-          price_oneoff: 900,
-          price_monthly: 60,
+          tagline: "Bespoke 5-page website — no templates, no jargon.",
+          description:
+            "A handcrafted online presence for local businesses — built from scratch, fast, secure, and Google-friendly.",
+          price_oneoff: 795,
+          price_monthly: 49,
           term_months: 24,
-          features: ["4–6 pages", "Responsive design", "Basic SEO", "Hosting setup"],
+          features: [
+            "5 bespoke, custom-designed pages",
+            "Responsive & SEO-optimised",
+            "Google Maps & Business Profile integration",
+            "Secure UK hosting + SSL (12 months included)",
+            "Contact form with spam protection",
+            "Basic WebCare maintenance",
+          ],
         },
         {
           name: "Business",
-          tagline: "For growing companies needing automation",
-          price_oneoff: 2600,
-          price_monthly: 140,
+          tagline: "For growing companies — CRM, quoting & automation built in.",
+          description:
+            "Bespoke website + integrated CRM tools for leads, jobs, quotes, and invoicing — built around your workflow.",
+          price_oneoff: 1495,
+          price_monthly: 85,
           term_months: 24,
-          features: ["All Starter features", "Booking system", "Invoicing tools", "CRM core"],
+          features: [
+            "All Starter features included",
+            "Custom CRM dashboard (leads, clients & jobs)",
+            "Integrated quoting & invoicing",
+            "Automated email replies & smart forms",
+            "Booking forms / scheduling",
+            "Analytics & local SEO setup",
+          ],
         },
         {
           name: "Premium",
-          tagline: "Full bespoke CRM + integrations",
-          price_oneoff: 6000,
-          price_monthly: 300,
+          tagline:
+            "Our flagship automation suite — bookings, payments & client portals.",
+          description:
+            "A complete digital platform: bespoke CRM, automation, client portals, billing, and analytics.",
+          price_oneoff: 2950,
+          price_monthly: 160,
           term_months: 24,
-          features: ["All Business features", "Custom APIs", "Automations", "Priority support"],
+          features: [
+            "All Business features included",
+            "Bespoke CRM & project management",
+            "Online bookings, payments & subscriptions",
+            "Client portal (secure access)",
+            "Automated invoicing & reminders",
+            "Priority WebCare support",
+          ],
         },
       ];
 
-      for (const p of defaults) {
+      for (const p of packagesSeed) {
         await pool.query(
-          `INSERT INTO packages
-           (name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, pricing_guardrails)
-           VALUES ($1,$2,$3,$4,$5,$6,0,TRUE,'{}'::jsonb);`,
-          [p.name, p.tagline, p.price_oneoff, p.price_monthly, p.term_months, p.features]
+          `
+          INSERT INTO packages
+            (name, tagline, description, price_oneoff, price_monthly, term_months,
+             features, discount_percent, visible, pricing_guardrails, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,0,TRUE,$8::jsonb,NOW(),NOW());
+          `,
+          [
+            p.name,
+            p.tagline,
+            p.description,
+            p.price_oneoff,
+            p.price_monthly,
+            p.term_months,
+            p.features,
+            JSON.stringify(guardrailsDefault),
+          ]
         );
       }
       console.log("[DB] Default packages seeded.");
     }
 
-    const { rows: planRows } = await pool.query("SELECT COUNT(*)::int AS c FROM maintenance_plans;");
-    if ((planRows?.[0]?.c ?? 0) === 0) {
+    // Maintenance plans
+    const { rows: mpCountRows } = await pool.query(
+      "SELECT COUNT(*)::int AS c FROM maintenance_plans;"
+    );
+    if ((mpCountRows?.[0]?.c ?? 0) === 0) {
       const plans = [
         {
           name: "Essential Care",
           price: 45,
-          description: "Core updates, backups, and security monitoring.",
+          description:
+            "Basic protection for small business sites — backups, updates, security & uptime checks.",
           features: [
-            "Weekly backups",
-            "CMS & plugin updates",
-            "Security scans",
-            "Uptime monitoring",
+            "Weekly backups & plugin updates",
+            "Security & uptime monitoring",
+            "Malware protection & SSL renewal",
+            "Email support (within 48h)",
           ],
           sort_order: 10,
         },
         {
           name: "Performance Care",
           price: 95,
-          description: "Performance, SEO, and reporting for growing businesses.",
+          description:
+            "Proactive care with speed monitoring, SEO health checks, and monthly reporting.",
           features: [
-            "Everything in Essential",
-            "Speed optimisation",
-            "SEO health check",
-            "Monthly report",
+            "All Essential features included",
+            "Monthly SEO & performance audit",
+            "Speed & mobile optimisation checks",
+            "1 hour of content edits per month",
+            "Priority support within 48h",
           ],
           sort_order: 20,
         },
         {
           name: "Total WebCare",
           price: 195,
-          description: "Full service for mission-critical sites with priority support.",
+          description:
+            "Complete WebCare — edits, analytics, reports, strategy calls and emergency fixes.",
           features: [
-            "Everything in Performance",
-            "3 hrs monthly updates",
-            "Priority support (24h)",
+            "All Performance features included",
+            "3 hours of monthly content updates",
+            "Analytics dashboard access",
+            "Quarterly strategy call",
             "Emergency fixes included",
+            "Priority support within 24h",
           ],
           sort_order: 30,
         },
       ];
+
       for (const p of plans) {
         await pool.query(
-          `INSERT INTO maintenance_plans
-           (name, price, description, features, visible, sort_order)
-           VALUES ($1,$2,$3,$4,TRUE,$5);`,
+          `
+          INSERT INTO maintenance_plans
+            (name, price, description, features, visible, sort_order, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,TRUE,$5,NOW(),NOW());
+          `,
           [p.name, p.price, p.description, p.features, p.sort_order]
         );
       }
@@ -387,7 +492,7 @@ export async function runMigrations() {
     }
 
     await pool.query("COMMIT");
-    console.log("[DB] ✅ Migrations complete — no data lost.");
+    console.log("[DB] ✅ Migrations complete — schema up-to-date, no data lost.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("[DB] Migration error:", err.message);
