@@ -226,19 +226,16 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
       return res.json({ success: true, order: existing.rows[0], message: "Order already exists." });
 
     // 🔧 Fetch live maintenance pricing if applicable
-    let maintenanceName = null;
-    let maintenanceMonthly = 0;
+   // Load maintenance price if applicable
+let maintenanceMonthly = 0;
+if (quote.maintenance_id) {
+  const { rows: maintRows } = await pool.query(
+    `SELECT price FROM maintenance_plans WHERE id = $1;`,
+    [quote.maintenance_id]
+  );
+  maintenanceMonthly = maintRows[0]?.price || 0;
+}
 
-    if (q.maintenance_id) {
-      const { rows: maintRows } = await pool.query(
-        "SELECT name, price FROM maintenance_plans WHERE id=$1",
-        [q.maintenance_id]
-      );
-      if (maintRows.length) {
-        maintenanceName = maintRows[0].name;
-        maintenanceMonthly = Number(maintRows[0].price || 0);
-      }
-    }
 
     // 🔧 Calculate totals correctly
     const total = calcSubtotal(q.items);
