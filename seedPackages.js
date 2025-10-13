@@ -1,17 +1,19 @@
 /**
  * ============================================================
- * PJH Web Services — Package Seeder Script (2025 Enhanced)
+ * PJH Web Services — Package Seeder Script (2025 Refined)
  * ============================================================
- * Populates the `packages` table with full, descriptive website
- * packages that reflect PJH Web Services’ honest, local approach.
+ * Populates the `packages` table with realistic, honest website
+ * packages that match PJH Web Services’ bespoke approach.
  *
  * Includes:
- *  • Starter  — the essentials done properly
- *  • Business — scalable systems for growing companies
- *  • Premium  — full bespoke CRM, automation & ongoing strategy
+ *  • Starter  — bespoke 5-page design, SEO, hosting & WebCare
+ *  • Business — full CRM, automation & growth systems
+ *  • Premium  — full automation suite with payments & portals
  * ------------------------------------------------------------
- * Each package includes realistic marketing copy and features
- * that communicate value, clarity, and no-nonsense delivery.
+ * Each entry reflects your brand tone:
+ *   • No templates
+ *   • No jargon
+ *   • Trend-aware, performance-driven web design
  * ============================================================
  */
 
@@ -32,87 +34,87 @@ async function seedPackages() {
       process.exit(0);
     }
 
-    console.log("📦 Seeding enhanced default packages…");
+    console.log("📦 Seeding refined 2025 packages…");
 
     const packages = [
       {
         name: "Starter",
-        tagline: "Get online with confidence — no fluff, just results",
-        price_oneoff: 900,
-        price_monthly: 60,
+        tagline: "Bespoke 5-page website — no templates, no jargon.",
+        price_oneoff: 795,
+        price_monthly: 49,
         term_months: 24,
         features: [
-          "5-page custom-built website designed around your business",
-          "Fully mobile-responsive and lightning-fast performance",
-          "Local SEO setup and Google optimisation to help you rank",
-          "Integrated contact form, maps, and social links",
-          "Domain registration and secure managed hosting included",
-          "Ongoing updates and content edits available via WebCare",
+          "5 fully bespoke, custom-designed pages",
+          "Responsive design optimised for mobile & Google search",
+          "Local SEO setup with Google Maps & Business Profile integration",
+          "Secure UK-based hosting & SSL certificate (first 12 months included)",
+          "Contact form with direct email delivery & spam protection",
+          "Basic WebCare maintenance: updates, backups & two content edits per year",
         ],
         description: `
-          The Starter package is perfect for tradesmen, small shops, and local
-          sole traders who simply want a professional, modern website that works.
-          No buzzwords, no gimmicks — just clean design, real SEO, and a trusted
-          online presence that helps customers find you.
-          
-          We cut through the marketing noise that tells small businesses they
-          “need a funnel”, “need daily ads”, or “need to go viral”. You don’t.
-          You need a reliable, Google-friendly website that actually converts
-          local enquiries into paying customers — and we deliver exactly that.
+          The Starter Package gives local tradesmen, shops, and sole traders a truly bespoke
+          online presence — designed from scratch, not templates. It’s perfect for small
+          businesses that want to look professional, appear on Google, and attract real customers.
+
+          Every build is crafted around your goals, with fast performance, mobile optimisation,
+          and secure hosting included. We cut through the buzzwords and deliver a clean, modern
+          website that does exactly what it should — get you more local enquiries.
         `,
         visible: true,
       },
       {
         name: "Business",
-        tagline: "Designed for growing companies ready to scale up",
-        price_oneoff: 2600,
-        price_monthly: 140,
+        tagline: "For growing companies — built-in CRM, quoting & automation.",
+        price_oneoff: 1495,
+        price_monthly: 85,
         term_months: 24,
         features: [
-          "Everything from the Starter plan, plus:",
-          "Custom CRM core built for your workflow (quotes, bookings, invoices)",
-          "Online booking and scheduling system with automated emails",
-          "Integrated invoicing and payment tracking dashboard",
-          "Advanced on-page SEO and Google Business integration",
-          "Optional social-media embedding and blog functionality",
+          "All Starter features included",
+          "Custom CRM dashboard for leads, clients & job tracking",
+          "Integrated quoting and invoicing system",
+          "Automated email replies & smart enquiry handling",
+          "Booking forms and scheduling tools",
+          "Google Analytics & Search Console integration",
+          "On-page SEO setup with local keyword targeting",
+          "12 months of hosting, SSL & WebCare included",
         ],
         description: `
-          The Business package is built for companies that are outgrowing “just a website”.
-          You need proper tools — quoting, booking, tracking, and automating the things
-          that eat into your time. We build custom CRM systems that fit your business
-          (not the other way around) so you can manage everything from one place.
+          The Business Package is built for companies that have outgrown a simple brochure site.
+          We combine a fully bespoke design with integrated CRM tools to manage leads, quotes,
+          jobs, and invoices — all from one place.
 
-          While everyone else is chasing social-media trends and overcomplicated marketing,
-          we focus on what actually builds your business: visibility, credibility, and trust.
-          Our job is to handle the digital side — so you can keep doing what you do best.
+          Every system is built around your workflow — not a template. With automation, analytics,
+          and SEO all built in, this package gives you the tools to scale efficiently without
+          drowning in admin. We handle the digital side so you can focus on running your business.
         `,
         visible: true,
       },
       {
         name: "Premium",
-        tagline: "Complete digital systems — websites, CRMs, automation & care",
-        price_oneoff: 6000,
-        price_monthly: 300,
+        tagline:
+          "Our flagship automation suite — CRM, bookings, payments & client portals.",
+        price_oneoff: 2950,
+        price_monthly: 160,
         term_months: 24,
         features: [
-          "All Business features, plus:",
-          "Fully bespoke CRM and workflow automation suite",
-          "Online payments and recurring billing integration",
-          "Customer portals with secure login and data management",
-          "Automated email and SMS notifications",
-          "Priority technical support and dedicated maintenance",
+          "All Business features included",
+          "Fully bespoke CRM & project management system",
+          "Online bookings, payments & recurring billing (Stripe / GoCardless)",
+          "Client login portal with secure data access",
+          "Automated invoicing, reminders & follow-ups",
+          "Advanced analytics & performance dashboard",
+          "Team roles, access control & multi-user management",
+          "Priority WebCare Premium maintenance & support included",
         ],
         description: `
-          The Premium package is for serious operators who want their digital presence
-          to do more than look good — it should *work hard*. This is a complete custom
-          business platform built around your daily operations: from first enquiry
-          to payment, automation, and follow-up.
+          The Premium Package is a complete digital platform for established businesses that
+          want their website to handle everything — from client onboarding and payments to
+          ongoing automation.
 
-          We combine design, CRM, automation, and ongoing strategy under one roof.
-          No outsourcing, no “we’ll get back to you next week” support.
-          Just a single team that knows your system inside out — and keeps it
-          secure, compliant, and up-to-date with every digital trend, so you don’t
-          have to.
+          We design and build a custom CRM and automation suite that fits your operations
+          exactly — integrating bookings, invoices, reminders, and analytics in one unified
+          system. Built from scratch, maintained by us, and always kept ahead of digital trends,
+          this is the ultimate all-in-one business platform.
         `,
         visible: true,
       },
@@ -138,7 +140,6 @@ async function seedPackages() {
         ]
       );
 
-      // Now attach the long description as an extra update (in case schema lacks column)
       try {
         await pool.query(
           `ALTER TABLE packages ADD COLUMN IF NOT EXISTS description TEXT`
@@ -154,7 +155,7 @@ async function seedPackages() {
       console.log(`✅ Inserted package: ${pkg.name}`);
     }
 
-    console.log("🎉 Enhanced packages seeded successfully!");
+    console.log("🎉 Refined packages seeded successfully!");
   } catch (err) {
     console.error("❌ Package seeding failed:", err.message);
   } finally {
