@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * PJH Web Services — Packages Management API
+ * PJH Web Services — Packages Management API (2025-10 Stable)
  * ============================================================
  * CRUD for website & CRM packages.
  * Adds flexible `pricing_guardrails` for pay-monthly controls:
@@ -13,6 +13,13 @@
  *     default_payment_method: "direct_debit",
  *     tcs_version: "2025-01"
  *   }
+ * ------------------------------------------------------------
+ * Includes:
+ *   • Public list (GET /api/packages)
+ *   • Single package (GET /api/packages/:id)
+ *   • Slug lookup (GET /api/packages/slug/:slug)
+ *   • Admin full list (GET /api/packages/all)
+ *   • Create / Update / Delete (admin only)
  * ============================================================
  */
 
@@ -21,24 +28,32 @@ import pool from "../db.js";
 
 const router = express.Router();
 
-// --------- helpers ----------
+// ------------------------------------------------------------
+// 🧩 Helpers
+// ------------------------------------------------------------
 function toGuardrails(input) {
-  // Accept object or JSON string; coerce with sensible defaults
   let g = {};
-  if (!input) return {
-    require_deposit_months: 1,
-    min_term_months: 24,
-    early_exit_fee_pct: 40,
-    ownership_until_paid: true,
-    late_fee_pct: 5,
-    default_payment_method: "direct_debit",
-    tcs_version: "2025-01",
-  };
+  if (!input)
+    return {
+      require_deposit_months: 1,
+      min_term_months: 24,
+      early_exit_fee_pct: 40,
+      ownership_until_paid: true,
+      late_fee_pct: 5,
+      default_payment_method: "direct_debit",
+      tcs_version: "2025-01",
+    };
+
   if (typeof input === "string") {
-    try { g = JSON.parse(input); } catch { g = {}; }
+    try {
+      g = JSON.parse(input);
+    } catch {
+      g = {};
+    }
   } else if (typeof input === "object") {
     g = { ...input };
   }
+
   return {
     require_deposit_months: Math.max(0, Number(g.require_deposit_months ?? 1)),
     min_term_months: Math.max(1, Number(g.min_term_months ?? 24)),
@@ -61,47 +76,117 @@ function ensureArray(val) {
   return [];
 }
 
-// -----------------------------
-// GET /api/packages (public, visible only)
-// -----------------------------
+// ------------------------------------------------------------
+// 🌍 PUBLIC ROUTES
+// ------------------------------------------------------------
+
+// GET /api/packages — visible only
 router.get("/", async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT id, name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, 
+      SELECT id, name, tagline, price_oneoff, price_monthly, term_months, features,
+             discount_percent, visible,
              COALESCE(pricing_guardrails, '{}'::jsonb) AS pricing_guardrails
-      FROM packages 
-      WHERE visible = TRUE 
+      FROM packages
+      WHERE visible = TRUE
       ORDER BY id ASC
     `);
 
     res.json({ success: true, data: rows, count: rows.length });
   } catch (err) {
     console.error("❌ [DB] Error fetching packages:", err.message);
-    res.status(500).json({ success: false, error: "Failed to fetch packages." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch packages." });
   }
 });
 
-// -----------------------------
-// GET /api/packages/all (admin)
-// -----------------------------
+// GET /api/packages/slug/:slug — public (for SEO-friendly links)
+router.get("/slug/:slug", async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { rows } = await pool.query(
+      `
+      SELECT *
+      FROM packages
+      WHERE LOWER(name) = LOWER($1)
+      AND visible = TRUE
+      LIMIT 1
+      `,
+      [slug]
+    );
+
+    if (!rows.length) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Package not found." });
+    }
+
+    res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error("❌ [DB] Error fetching package by slug:", err.message);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch package by slug." });
+  }
+});
+
+// GET /api/packages/:id — public (numeric ID)
+router.get("/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // prevent slug route conflicts
+    if (isNaN(Number(id))) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid package ID." });
+    }
+
+    const { rows } = await pool.query(
+      `SELECT * FROM packages WHERE id = $1 AND visible = TRUE LIMIT 1`,
+      [id]
+    );
+
+    if (!rows.length) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Package not found." });
+    }
+
+    res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error("❌ [DB] Error fetching package by ID:", err.message);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch package by ID." });
+  }
+});
+
+// ------------------------------------------------------------
+// 🔐 ADMIN ROUTES
+// ------------------------------------------------------------
+
+// GET /api/packages/all — admin only
 router.get("/all", async (_req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT id, name, tagline, price_oneoff, price_monthly, term_months, features, discount_percent, visible, 
+      SELECT id, name, tagline, price_oneoff, price_monthly, term_months, features,
+             discount_percent, visible,
              COALESCE(pricing_guardrails, '{}'::jsonb) AS pricing_guardrails
-      FROM packages 
+      FROM packages
       ORDER BY id ASC
     `);
     res.json({ success: true, data: rows, count: rows.length });
   } catch (err) {
     console.error("❌ [DB] Error fetching all packages:", err.message);
-    res.status(500).json({ success: false, error: "Failed to fetch all packages." });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch all packages." });
   }
 });
 
-// -----------------------------
-// POST /api/packages (admin)
-// -----------------------------
+// POST /api/packages — create new (admin)
 router.post("/", async (req, res) => {
   const {
     name,
@@ -116,14 +201,19 @@ router.post("/", async (req, res) => {
   } = req.body;
 
   if (!name) {
-    return res.status(400).json({ success: false, error: "Package name is required." });
+    return res
+      .status(400)
+      .json({ success: false, error: "Package name is required." });
   }
 
-  // ⚖️ validation for monthly plans
   const guards = toGuardrails(pricing_guardrails);
+
   if (price_monthly && Number(price_monthly) > 0) {
     if (!term_months || Number(term_months) < 1) {
-      return res.status(400).json({ success: false, error: "Monthly plans require a valid term_months (e.g., 24)." });
+      return res.status(400).json({
+        success: false,
+        error: "Monthly plans require a valid term_months (e.g., 24).",
+      });
     }
   }
 
@@ -132,7 +222,8 @@ router.post("/", async (req, res) => {
       `
       INSERT INTO packages (
         name, tagline, price_oneoff, price_monthly, term_months,
-        features, discount_percent, visible, pricing_guardrails, created_at, updated_at
+        features, discount_percent, visible, pricing_guardrails,
+        created_at, updated_at
       )
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,NOW(),NOW())
       RETURNING *;
@@ -150,20 +241,16 @@ router.post("/", async (req, res) => {
       ]
     );
 
-    res.status(201).json({
-      success: true,
-      message: "Package created successfully.",
-      data: rows[0],
-    });
+    res
+      .status(201)
+      .json({ success: true, message: "Package created.", data: rows[0] });
   } catch (err) {
     console.error("❌ [DB] Error creating package:", err.message);
     res.status(500).json({ success: false, error: "Failed to create package." });
   }
 });
 
-// -----------------------------
-// PUT /api/packages/:id (admin)
-// -----------------------------
+// PUT /api/packages/:id — update (admin)
 router.put("/:id", async (req, res) => {
   const { id } = req.params;
   const {
@@ -180,10 +267,12 @@ router.put("/:id", async (req, res) => {
 
   const guards = pricing_guardrails ? toGuardrails(pricing_guardrails) : null;
 
-  // If updating to a monthly plan, validate term
   if (price_monthly && Number(price_monthly) > 0) {
     if (!term_months || Number(term_months) < 1) {
-      return res.status(400).json({ success: false, error: "Monthly plans require a valid term_months (e.g., 24)." });
+      return res.status(400).json({
+        success: false,
+        error: "Monthly plans require a valid term_months (e.g., 24).",
+      });
     }
   }
 
@@ -220,19 +309,23 @@ router.put("/:id", async (req, res) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ success: false, error: "Package not found." });
+      return res
+        .status(404)
+        .json({ success: false, error: "Package not found." });
     }
 
-    res.json({ success: true, message: "Package updated successfully.", data: rows[0] });
+    res.json({
+      success: true,
+      message: "Package updated successfully.",
+      data: rows[0],
+    });
   } catch (err) {
     console.error("❌ [DB] Error updating package:", err.message);
     res.status(500).json({ success: false, error: "Failed to update package." });
   }
 });
 
-// -----------------------------
-// DELETE /api/packages/:id (admin)
-// -----------------------------
+// DELETE /api/packages/:id — delete (admin)
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
   try {
@@ -242,10 +335,16 @@ router.delete("/:id", async (req, res) => {
     );
 
     if (!rows.length) {
-      return res.status(404).json({ success: false, error: "Package not found." });
+      return res
+        .status(404)
+        .json({ success: false, error: "Package not found." });
     }
 
-    res.json({ success: true, message: "Package deleted successfully.", data: rows[0] });
+    res.json({
+      success: true,
+      message: "Package deleted successfully.",
+      data: rows[0],
+    });
   } catch (err) {
     console.error("❌ [DB] Error deleting package:", err.message);
     res.status(500).json({ success: false, error: "Failed to delete package." });
