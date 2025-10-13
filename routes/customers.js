@@ -1,9 +1,12 @@
 /**
  * ============================================================
- * PJH Web Services — Customer Management API
+ * PJH Web Services — Customer Management API (2025 Refined)
  * ============================================================
- * CRUD endpoints for managing customer records in PostgreSQL.
- * Powers the Admin CRM and Quote System.
+ * Central CRM API for PJH Web Services:
+ *   • Full CRUD for customer profiles
+ *   • Joins with quotes and orders for admin panels
+ *   • Cascade-safe deletions (removes related quotes + orders)
+ *   • Consistent JSON schema across all endpoints
  * ============================================================
  */
 
@@ -23,9 +26,15 @@ router.get("/", async (_req, res) => {
       FROM customers
       ORDER BY created_at DESC;
     `);
-    res.json({ success: true, data: rows, count: rows.length });
+
+    res.json({
+      success: true,
+      message: "Customers retrieved successfully.",
+      data: rows,
+      count: rows.length,
+    });
   } catch (err) {
-    console.error("❌ [DB] Error fetching customers:", err);
+    console.error("❌ [DB][Customers] Error fetching customers:", err);
     res.status(500).json({
       success: false,
       error: "Failed to fetch customers.",
@@ -84,10 +93,14 @@ router.post("/", async (req, res) => {
     if (!rows.length) throw new Error("Customer insert returned no data.");
 
     const customer = rows[0];
-    console.log(`✅ [DB] Customer created: ${customer.name} (ID: ${customer.id})`);
-    res.status(201).json({ success: true, customer });
+    console.log(`✅ [DB][Customers] Created: ${customer.name} (ID: ${customer.id})`);
+    res.status(201).json({
+      success: true,
+      message: "Customer created successfully.",
+      data: customer,
+    });
   } catch (err) {
-    console.error("❌ [DB] Error creating customer:", err);
+    console.error("❌ [DB][Customers] Error creating customer:", err);
     res.status(500).json({
       success: false,
       error: "Failed to create customer.",
@@ -103,10 +116,7 @@ router.get("/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
-    const { rows } = await pool.query(
-      `SELECT * FROM customers WHERE id = $1;`,
-      [id]
-    );
+    const { rows } = await pool.query("SELECT * FROM customers WHERE id = $1;", [id]);
 
     if (!rows.length) {
       return res.status(404).json({
@@ -115,10 +125,13 @@ router.get("/:id", async (req, res) => {
       });
     }
 
-    // Align with frontend expectation → return { success, data, customer }
-    res.json({ success: true, data: rows[0], customer: rows[0] });
+    res.json({
+      success: true,
+      message: "Customer retrieved successfully.",
+      data: rows[0],
+    });
   } catch (err) {
-    console.error("❌ [DB] Error fetching customer:", err);
+    console.error("❌ [DB][Customers] Error fetching customer:", err);
     res.status(500).json({
       success: false,
       error: "Failed to fetch customer.",
@@ -186,10 +199,14 @@ router.put("/:id", async (req, res) => {
       });
     }
 
-    console.log(`📝 [DB] Customer updated (ID: ${id})`);
-    res.json({ success: true, customer: rows[0], data: rows[0] });
+    console.log(`📝 [DB][Customers] Updated (ID: ${id})`);
+    res.json({
+      success: true,
+      message: "Customer updated successfully.",
+      data: rows[0],
+    });
   } catch (err) {
-    console.error("❌ [DB] Error updating customer:", err);
+    console.error("❌ [DB][Customers] Error updating customer:", err);
     res.status(500).json({
       success: false,
       error: "Failed to update customer.",
@@ -199,31 +216,44 @@ router.put("/:id", async (req, res) => {
 
 /* ============================================================
    🗑️ DELETE /api/customers/:id
-   Delete customer (and cascade related records)
+   Delete customer and cascade related data
 ============================================================ */
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
+  const client = await pool.connect();
+
   try {
-    const { rowCount } = await pool.query(
-      "DELETE FROM customers WHERE id = $1",
-      [id]
-    );
+    await client.query("BEGIN");
+
+    // Remove related quotes & orders first
+    await client.query("DELETE FROM orders WHERE customer_id = $1;", [id]);
+    await client.query("DELETE FROM quotes WHERE customer_id = $1;", [id]);
+
+    const { rowCount } = await client.query("DELETE FROM customers WHERE id = $1;", [id]);
+
+    await client.query("COMMIT");
 
     if (rowCount === 0) {
       return res.status(404).json({
         success: false,
-        error: "Customer not found.",
+        error: "Customer not found or already deleted.",
       });
     }
 
-    console.log(`🗑️ [DB] Customer deleted (ID: ${id})`);
-    res.json({ success: true, message: "Customer deleted successfully." });
+    console.log(`🗑️ [DB][Customers] Deleted (ID: ${id}) + related records`);
+    res.json({
+      success: true,
+      message: "Customer and related records deleted successfully.",
+    });
   } catch (err) {
-    console.error("❌ [DB] Error deleting customer:", err);
+    await client.query("ROLLBACK");
+    console.error("❌ [DB][Customers] Error deleting customer:", err);
     res.status(500).json({
       success: false,
-      error: "Failed to delete customer.",
+      error: "Failed to delete customer and related records.",
     });
+  } finally {
+    client.release();
   }
 });
 
@@ -239,18 +269,25 @@ router.get("/:id/quotes", async (req, res) => {
       SELECT q.*, 
              p.name AS package_name,
              p.price_oneoff,
-             p.price_monthly
+             p.price_monthly,
+             m.name AS maintenance_name,
+             m.price AS maintenance_monthly
       FROM quotes q
       LEFT JOIN packages p ON q.package_id = p.id
+      LEFT JOIN maintenance_plans m ON q.maintenance_id = m.id
       WHERE q.customer_id = $1
       ORDER BY q.created_at DESC;
       `,
       [id]
     );
 
-    res.json({ success: true, quotes: rows, data: rows });
+    res.json({
+      success: true,
+      message: "Quotes retrieved successfully.",
+      data: rows,
+    });
   } catch (err) {
-    console.error("❌ [DB] Error fetching customer quotes:", err);
+    console.error("❌ [DB][Customers] Error fetching customer quotes:", err);
     res.status(500).json({
       success: false,
       error: "Failed to fetch customer quotes.",
@@ -269,7 +306,9 @@ router.get("/:id/orders", async (req, res) => {
       `
       SELECT o.*, 
              c.name AS customer_name,
-             c.business AS customer_business
+             c.business AS customer_business,
+             o.maintenance_name,
+             o.maintenance_monthly
       FROM orders o
       JOIN customers c ON o.customer_id = c.id
       WHERE o.customer_id = $1
@@ -278,9 +317,13 @@ router.get("/:id/orders", async (req, res) => {
       [id]
     );
 
-    res.json({ success: true, orders: rows, data: rows });
+    res.json({
+      success: true,
+      message: "Orders retrieved successfully.",
+      data: rows,
+    });
   } catch (err) {
-    console.error("❌ [DB] Error fetching customer orders:", err);
+    console.error("❌ [DB][Customers] Error fetching customer orders:", err);
     res.status(500).json({
       success: false,
       error: "Failed to fetch customer orders.",

@@ -11,6 +11,7 @@
  *   • Ensures maintenance_monthly reflects live pricing
  *   • Returns both package_name and maintenance_name on admin view
  *   • Adds fallback for stale maintenance_id references
+ *   • Includes DELETE support for both admin + customer
  * ============================================================
  */
 
@@ -96,6 +97,7 @@ quotesCustomerRouter.post("/:id/quotes", async (req, res) => {
     console.log(`📝 Quote created for customer ${id}: ${quoteNumber}`);
     res.status(201).json({
       success: true,
+      message: "Quote created successfully.",
       quote: { ...rows[0], package: pkg?.name, maintenance: maint?.name },
     });
   } catch (err) {
@@ -150,6 +152,25 @@ quotesCustomerRouter.get("/:id/quotes/:quoteId", async (req, res) => {
   } catch (err) {
     console.error("❌ Error fetching quote:", err);
     res.status(500).json({ success: false, error: "Failed to fetch quote." });
+  }
+});
+
+// ❌ Delete Quote (Customer)
+quotesCustomerRouter.delete("/:id/quotes/:quoteId", async (req, res) => {
+  const { quoteId, id } = req.params;
+  try {
+    const { rowCount } = await pool.query(
+      "DELETE FROM quotes WHERE id=$1 AND customer_id=$2;",
+      [quoteId, id]
+    );
+    if (rowCount === 0)
+      return res.status(404).json({ success: false, error: "Quote not found or already deleted." });
+
+    console.log(`🗑️ Quote ${quoteId} deleted by customer ${id}`);
+    res.json({ success: true, message: `Quote ${quoteId} deleted successfully.` });
+  } catch (err) {
+    console.error("❌ Error deleting quote:", err);
+    res.status(500).json({ success: false, error: "Failed to delete quote." });
   }
 });
 
@@ -243,5 +264,21 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   } catch (err) {
     console.error("❌ Error creating order from quote:", err);
     res.status(500).json({ success: false, error: "Failed to create order." });
+  }
+});
+
+// ❌ Delete Quote (Admin)
+quotesAdminRouter.delete("/:quoteId", async (req, res) => {
+  const { quoteId } = req.params;
+  try {
+    const { rowCount } = await pool.query("DELETE FROM quotes WHERE id=$1;", [quoteId]);
+    if (rowCount === 0)
+      return res.status(404).json({ success: false, message: "Quote not found or already deleted." });
+
+    console.log(`🗑️ Admin deleted quote ${quoteId}`);
+    res.json({ success: true, message: `Quote ${quoteId} deleted successfully.` });
+  } catch (err) {
+    console.error("❌ Error deleting admin quote:", err);
+    res.status(500).json({ success: false, error: "Failed to delete quote." });
   }
 });
