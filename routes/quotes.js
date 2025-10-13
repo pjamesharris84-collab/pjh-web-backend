@@ -212,7 +212,7 @@ quotesAdminRouter.get("/:quoteId", async (req, res) => {
   }
 });
 
-// 🧩 Create Order from Quote
+// 🧩 Create Order from Quote (Improved)
 quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   const { quoteId } = req.params;
   try {
@@ -225,14 +225,22 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
     if (existing.rows.length)
       return res.json({ success: true, order: existing.rows[0], message: "Order already exists." });
 
-    // Pull current maintenance plan info
-    const { rows: maintRows } = await pool.query(
-      "SELECT name, price FROM maintenance_plans WHERE id=$1",
-      [q.maintenance_id || null]
-    );
-    const maintenanceMonthly = Number(maintRows?.[0]?.price || 0);
-    const maintenanceName = maintRows?.[0]?.name || null;
+    // 🔧 Fetch live maintenance pricing if applicable
+    let maintenanceName = null;
+    let maintenanceMonthly = 0;
 
+    if (q.maintenance_id) {
+      const { rows: maintRows } = await pool.query(
+        "SELECT name, price FROM maintenance_plans WHERE id=$1",
+        [q.maintenance_id]
+      );
+      if (maintRows.length) {
+        maintenanceName = maintRows[0].name;
+        maintenanceMonthly = Number(maintRows[0].price || 0);
+      }
+    }
+
+    // 🔧 Calculate totals correctly
     const total = calcSubtotal(q.items);
     const deposit = Number(q.deposit ?? total * 0.5);
     const balance = Math.max(0, total - deposit);
@@ -242,7 +250,8 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
       INSERT INTO orders (
         customer_id, quote_id, title, description, status, items, tasks, deposit, balance,
         diary, maintenance_name, maintenance_monthly, created_at, updated_at
-      ) VALUES ($1,$2,$3,$4,'in_progress',$5,'[]',$6,$7,'[]',$8,$9,NOW(),NOW())
+      )
+      VALUES ($1,$2,$3,$4,'in_progress',$5,'[]',$6,$7,'[]',$8,$9,NOW(),NOW())
       RETURNING *;
       `,
       [
@@ -254,18 +263,23 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
         deposit,
         balance,
         maintenanceName,
-        maintenanceMonthly || null,
+        maintenanceMonthly,
       ]
     );
 
     await pool.query("UPDATE quotes SET status='closed', updated_at=NOW() WHERE id=$1;", [quoteId]);
 
-    res.json({ success: true, order: rows[0], message: "Order created from quote." });
+    res.json({
+      success: true,
+      order: rows[0],
+      message: `Order created successfully. Maintenance: £${maintenanceMonthly}/month.`,
+    });
   } catch (err) {
     console.error("❌ Error creating order from quote:", err);
     res.status(500).json({ success: false, error: "Failed to create order." });
   }
 });
+
 
 // ❌ Delete Quote (Admin)
 quotesAdminRouter.delete("/:quoteId", async (req, res) => {
