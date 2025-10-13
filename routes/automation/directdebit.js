@@ -51,20 +51,18 @@ router.get("/run", async (req, res) => {
       console.log(`💳 Charging ${cust.customer_name} £${amount.toFixed(2)} via Direct Debit...`);
 
       try {
-        const pi = await stripe.paymentIntents.create({
-          amount: Math.round(amount * 100),
-          currency: "gbp",
-          customer: cust.stripe_customer_id,
-          payment_method_types: ["bacs_debit"],
-          confirm: true,
-          mandate: cust.stripe_mandate_id,
-          off_session: true,
-          metadata: {
-            pjh_customer_id: cust.customer_id,
-            pjh_order_id: cust.order_id,
-            payment_type: "maintenance",
-          },
-        });
+        const paymentIntent = await stripe.paymentIntents.create({
+  amount: Math.round(amount * 100),
+  currency: "gbp",
+  customer: stripeCustomerId,
+  payment_method: customer.stripe_payment_method_id, // ✅ use the saved method
+  off_session: true,
+  confirm: true,
+  metadata: {
+    order_id: order.id,
+    payment_type: "maintenance",
+  },
+});
 
         console.log(`✅ Charged ${cust.customer_name} — £${amount.toFixed(2)} (PI: ${pi.id})`);
 

@@ -7,6 +7,7 @@
  * ✅ Webhook reconciliation (raw-body safe)
  * ✅ Refund endpoint (recharge-friendly)
  * ✅ Payments summary endpoint for Admin UI
+ * ✅ Stores payment_method_id for automation runs
  * ============================================================
  */
 
@@ -38,7 +39,6 @@ function toNum(v, f = 0) {
 
 /* ============================================================
    📊 GET /api/payments/summary/:orderId
-   → For Admin UI “Payments” tab
 ============================================================ */
 router.get("/summary/:orderId", async (req, res) => {
   try {
@@ -57,7 +57,6 @@ router.get("/summary/:orderId", async (req, res) => {
 
     const order = orows[0];
 
-    // deposit totals
     const { rows: dep } = await pool.query(
       `SELECT
          COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS paid,
@@ -68,7 +67,6 @@ router.get("/summary/:orderId", async (req, res) => {
     const depNet = Math.max(toNum(dep[0]?.paid) - Math.abs(toNum(dep[0]?.refunded)), 0);
     const depositOutstanding = Math.max(toNum(order.deposit) - depNet, 0);
 
-    // balance totals
     const { rows: bal } = await pool.query(
       `SELECT
          COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS paid,
@@ -79,7 +77,6 @@ router.get("/summary/:orderId", async (req, res) => {
     const balNet = Math.max(toNum(bal[0]?.paid) - Math.abs(toNum(bal[0]?.refunded)), 0);
     const balanceOutstanding = Math.max(toNum(order.balance) - balNet, 0);
 
-    // maintenance price (for UI display)
     const { rows: maint } = await pool.query(
       `SELECT price FROM maintenance_plans WHERE id=$1`,
       [order.maintenance_id]
@@ -108,7 +105,6 @@ router.get("/summary/:orderId", async (req, res) => {
 
 /* ============================================================
    💳 POST /api/payments/create-checkout
-   → Creates Stripe Checkout session
 ============================================================ */
 router.post("/create-checkout", async (req, res) => {
   try {
@@ -117,7 +113,6 @@ router.post("/create-checkout", async (req, res) => {
     if (flow !== "bacs_setup" && !type)
       return res.status(400).json({ error: "Missing type" });
 
-    // Get order + customer
     const { rows } = await pool.query(
       `SELECT o.*, c.id AS cid, c.name AS customer_name, c.email,
               c.stripe_customer_id, c.stripe_mandate_id, c.direct_debit_active
@@ -131,7 +126,6 @@ router.post("/create-checkout", async (req, res) => {
       req.body.amount ??
       (type === "deposit" ? toNum(order.deposit) : toNum(order.balance));
 
-    // Already paid?
     const { rows: summary } = await pool.query(
       `SELECT
          COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS paid,
@@ -144,7 +138,6 @@ router.post("/create-checkout", async (req, res) => {
     if (flow !== "bacs_setup" && amount <= 0)
       return res.status(400).json({ error: `No outstanding ${type} amount.` });
 
-    // Ensure Stripe customer
     let stripeCustomer = order.stripe_customer_id;
     if (!stripeCustomer) {
       const c = await stripe.customers.create({
@@ -221,7 +214,6 @@ router.post("/refund", async (req, res) => {
     const { rows } = await pool.query("SELECT * FROM payments WHERE id=$1", [payment_id]);
     if (!rows.length) return res.status(404).json({ error: "Payment not found" });
     const payment = rows[0];
-
     if (!payment.reference)
       return res.status(400).json({ error: "No Stripe reference on payment." });
 
@@ -253,8 +245,6 @@ router.post("/refund", async (req, res) => {
 
 /* ============================================================
    ⚡ POST /api/payments/webhook — Stripe Webhook Handler
-   NOTE: this file exports the router only;
-         it must be mounted *before* express.json() in index.js
 ============================================================ */
 router.post(
   "/webhook",
@@ -264,7 +254,7 @@ router.post(
     let event;
     try {
       event = stripe.webhooks.constructEvent(
-        req.body, // raw Buffer
+        req.body,
         sig,
         process.env.STRIPE_WEBHOOK_SECRET
       );
@@ -279,7 +269,7 @@ router.post(
           const s = event.data.object;
           const orderId = s.metadata?.order_id;
           const paymentType = s.metadata?.payment_type || "deposit";
-          const method = (s.payment_method_types?.[0] || "card");
+          const method = s.payment_method_types?.[0] || "card";
           const amount = (s.amount_total ?? 0) / 100;
           if (orderId && amount > 0) {
             await pool.query(
@@ -294,11 +284,16 @@ router.post(
 
         case "setup_intent.succeeded": {
           const si = event.data.object;
+          const paymentMethod = si.payment_method || null;
+          const mandate = si.mandate || null;
+          const customer = si.customer;
           await pool.query(
-            "UPDATE customers SET stripe_mandate_id=$1, direct_debit_active=true WHERE stripe_customer_id=$2",
-            [si.mandate, si.customer]
+            `UPDATE customers 
+             SET stripe_mandate_id=$1, stripe_payment_method_id=$2, direct_debit_active=true 
+             WHERE stripe_customer_id=$3`,
+            [mandate, paymentMethod, customer]
           );
-          console.log(`🏦 Direct Debit setup complete for ${si.customer}`);
+          console.log(`🏦 Direct Debit setup complete for ${customer}`);
           break;
         }
 
@@ -326,10 +321,7 @@ router.post(
 
         case "payment_intent.payment_failed": {
           const pi = event.data.object;
-          await pool.query(
-            "UPDATE payments SET status='failed' WHERE reference=$1",
-            [pi.id]
-          );
+          await pool.query("UPDATE payments SET status='failed' WHERE reference=$1", [pi.id]);
           console.log(`❌ Bacs Debit failed: ${pi.id}`);
           break;
         }
@@ -337,6 +329,7 @@ router.post(
         default:
           console.log(`ℹ️ Unhandled event: ${event.type}`);
       }
+
       res.json({ received: true });
     } catch (err) {
       console.error("❌ Webhook handler error:", err);
