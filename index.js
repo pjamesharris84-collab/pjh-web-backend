@@ -1,22 +1,25 @@
 // ============================================================
-// PJH Web Services — Server Startup File (Unified Billing Ready)
+// PJH Web Services — Server Startup (Unified Billing & Automation)
 // ============================================================
 // Handles:
 //  ✅ Express core + database migrations
-//  ✅ Secure CORS for local, Vercel, and live
-//  ✅ Stripe webhook signature-safe handling (Render-compatible)
-//  ✅ Static file delivery for PDFs/logos
+//  ✅ Secure CORS for Local, Render, and Live
+//  ✅ Stripe webhook (raw-body safe)
+//  ✅ Automated Direct Debit billing route
 //  ✅ Email-powered contact form
+//  ✅ Static assets for PDFs/logos
 // ============================================================
 
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import bodyParser from "body-parser";
+import path from "path";
+import { fileURLToPath } from "url";
 import { runMigrations } from "./db.js";
 import { sendEmail } from "./utils/email.js";
 
-// Routers
+// Core Routers
 import adminQuotesRoutes from "./routes/adminQuotes.js";
 import authRoutes from "./routes/auth.js";
 import customerRoutes from "./routes/customers.js";
@@ -28,29 +31,27 @@ import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 import packagesRouter from "./routes/packages.js";
 import maintenanceRouter from "./routes/maintenance.js";
 
-// ✅ Unified Stripe Checkout + Direct Debit Billing
+// ✅ Unified Stripe + Direct Debit Billing
 import paymentsRouter from "./routes/payments.js";
 
-import path from "path";
-import { fileURLToPath } from "url";
+// ✅ Recurring Billing Automation
+import automationRouter from "./routes/automation/index.js";
 
 dotenv.config();
 const app = express();
 
 /* ============================================================
-   ⚡ Stripe Webhook — Must be RAW, mounted BEFORE express.json()
+   ⚡ Stripe Webhook — Must be mounted BEFORE express.json()
+   (Raw body preserved for Stripe signature verification)
 ============================================================ */
 app.post(
   "/api/payments/webhook",
   bodyParser.raw({ type: "application/json" }),
-  (req, res, next) => {
-    // Pass through to router — Stripe will verify raw body inside
-    next();
-  }
+  (req, res, next) => next()
 );
 
 /* ============================================================
-   🌍 CORS Configuration (Local + Live + Vercel)
+   🌍 CORS Configuration (Local + Live + Render)
 ============================================================ */
 const defaultOrigins = [
   "http://localhost:5173",
@@ -153,8 +154,11 @@ app.post("/api/contact", async (req, res) => {
 /* ============================================================
    📦 API Routes
 ============================================================ */
-// ✅ Unified Stripe Billing System
+// ✅ Unified Stripe Billing
 app.use("/api/payments", paymentsRouter);
+
+// ✅ Recurring Automation (Direct Debit)
+app.use("/api/automation", automationRouter);
 
 // ✅ Core Routers
 app.use("/api/admin/quotes", adminQuotesRoutes);
@@ -175,12 +179,14 @@ app.use("/api/quotes", quotesAdminRouter);
 
 /* ============================================================
    🩹 Stub for /api/payments/schedule/:id
+   (Replaced soon by recurring automation link)
 ============================================================ */
 app.get("/api/payments/schedule/:id", (req, res) => {
   res.json({
     success: true,
     schedule: [],
-    message: "No recurring schedule available for this order yet.",
+    message:
+      "Recurring billing handled by Direct Debit automation (see /api/automation/directdebit/run).",
   });
 });
 
@@ -197,7 +203,7 @@ app.use(express.static(publicPath));
 ============================================================ */
 app.get("/", (req, res) => {
   res.send(
-    "✅ PJH Web Services API — Unified Stripe Checkout + Recurring Billing Active."
+    "✅ PJH Web Services API — Unified Stripe Checkout + Recurring Direct Debit Billing Active."
   );
 });
 
