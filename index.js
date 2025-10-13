@@ -1,14 +1,16 @@
-// ============================================================
-// PJH Web Services — Server Startup (Unified Billing & Automation)
-// ============================================================
-// Handles:
-//  ✅ Express core + database migrations
-//  ✅ Secure CORS for Local, Render, and Live
-//  ✅ Stripe webhook (raw-body safe)
-//  ✅ Automated Direct Debit billing route
-//  ✅ Email-powered contact form
-//  ✅ Static assets for PDFs/logos
-// ============================================================
+/**
+ * ============================================================
+ * PJH Web Services — Server Startup (Unified Billing & Automation)
+ * ============================================================
+ * Handles:
+ *  ✅ Express core + database migrations
+ *  ✅ Secure CORS for Local, Render, and Live
+ *  ✅ Stripe webhook (raw-body safe)
+ *  ✅ Automated Direct Debit billing route
+ *  ✅ Email-powered contact form
+ *  ✅ Static assets for PDFs/logos
+ * ============================================================
+ */
 
 import express from "express";
 import cors from "cors";
@@ -30,7 +32,6 @@ import orderDiaryRoutes from "./routes/orderDiary.js";
 import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 import packagesRouter from "./routes/packages.js";
 import maintenanceRouter from "./routes/maintenance.js";
-import stripeWebhookRouter from "./routes/stripeWebhook.js";
 
 // ✅ Unified Stripe + Direct Debit Billing
 import paymentsRouter from "./routes/payments.js";
@@ -47,9 +48,12 @@ const app = express();
    (Raw body preserved for Stripe signature verification)
 ============================================================ */
 app.post(
-  "/api/payments/webhook",
+  "/api/billing/webhook",
   bodyParser.raw({ type: "application/json" }),
-  (req, res, next) => next()
+  async (req, res, next) => {
+    // Pass through to billing router (webhook route is defined there)
+    next();
+  }
 );
 
 /* ============================================================
@@ -156,7 +160,8 @@ app.post("/api/contact", async (req, res) => {
 /* ============================================================
    📦 API Routes
 ============================================================ */
-// ✅ Unified Stripe Billing
+// ✅ Unified Stripe Billing + Webhook
+app.use("/api/billing", billingRouter);
 app.use("/api/payments", paymentsRouter);
 
 // ✅ Recurring Automation (Direct Debit)
@@ -171,8 +176,6 @@ app.use("/api/quotes", quoteResponseRoutes);
 app.use("/api/responses", responsesRoutes);
 app.use("/api/packages", packagesRouter);
 app.use("/api/maintenance", maintenanceRouter);
-app.use("/api/billing", billingRouter);
-app.use("/api/stripe", stripeWebhookRouter); // before app.use(express.json())
 
 // ✅ Dedicated Order Diary
 app.use("/api/diary", orderDiaryRoutes);
@@ -183,7 +186,6 @@ app.use("/api/quotes", quotesAdminRouter);
 
 /* ============================================================
    🩹 Stub for /api/payments/schedule/:id
-   (Replaced soon by recurring automation link)
 ============================================================ */
 app.get("/api/payments/schedule/:id", (req, res) => {
   res.json({
