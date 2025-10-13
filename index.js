@@ -5,7 +5,8 @@
  * Handles:
  *  ✅ Express core + database migrations
  *  ✅ Secure CORS for Local, Render, and Live
- *  ✅ Stripe webhook (raw-body safe)
+ *  ✅ Stripe webhooks (raw-body safe)
+ *  ✅ Unified Payments + Billing routers
  *  ✅ Automated Direct Debit billing route
  *  ✅ Email-powered contact form
  *  ✅ Static assets for PDFs/logos
@@ -21,7 +22,9 @@ import { fileURLToPath } from "url";
 import { runMigrations } from "./db.js";
 import { sendEmail } from "./utils/email.js";
 
+// ──────────────────────────────
 // Core Routers
+// ──────────────────────────────
 import adminQuotesRoutes from "./routes/adminQuotes.js";
 import authRoutes from "./routes/auth.js";
 import customerRoutes from "./routes/customers.js";
@@ -33,25 +36,28 @@ import { quotesCustomerRouter, quotesAdminRouter } from "./routes/quotes.js";
 import packagesRouter from "./routes/packages.js";
 import maintenanceRouter from "./routes/maintenance.js";
 
-// ✅ Unified Stripe + Direct Debit Billing
+// ──────────────────────────────
+// Stripe Billing + Automation
+// ──────────────────────────────
 import paymentsRouter from "./routes/payments.js";
 import billingRouter from "./routes/billing.js";
-
-// ✅ Recurring Billing Automation
 import automationRouter from "./routes/automation/index.js";
 
 dotenv.config();
 const app = express();
 
 /* ============================================================
-   ⚡ Stripe Webhook — Must be mounted BEFORE express.json()
-   (Raw body preserved for Stripe signature verification)
+   ⚡ Stripe Webhooks — Mount before JSON parsing
 ============================================================ */
-
 app.use(
   "/api/billing/webhook",
   bodyParser.raw({ type: "application/json" }),
   billingRouter
+);
+app.use(
+  "/api/payments/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  paymentsRouter
 );
 
 /* ============================================================
@@ -76,11 +82,7 @@ const allowedOrigins = (
 app.use(
   cors({
     origin: (origin, callback) => {
-      if (
-        !origin ||
-        allowedOrigins.includes(origin) ||
-        /\.vercel\.app$/.test(origin)
-      ) {
+      if (!origin || allowedOrigins.includes(origin) || /\.vercel\.app$/.test(origin)) {
         return callback(null, true);
       }
       console.warn(`🚫 Blocked CORS: ${origin}`);
@@ -91,6 +93,7 @@ app.use(
   })
 );
 
+// Preflight
 app.options("*", (req, res) => {
   res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.header(
@@ -112,18 +115,17 @@ console.table({
   STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? "✅" : "❌",
   STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET ? "✅" : "❌",
   DATABASE_URL: process.env.DATABASE_URL ? "✅" : "❌",
-  FRONTEND_URL:
-    process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk",
+  FRONTEND_URL: process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk",
 });
 
 /* ============================================================
-   🧱 Enable JSON Parsing (after webhook route)
+   🧱 Enable JSON Parsing (after webhook routes)
 ============================================================ */
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* ============================================================
-   🧱 Database Migrations
+   🧱 Run Database Migrations
 ============================================================ */
 await runMigrations();
 
@@ -132,7 +134,6 @@ await runMigrations();
 ============================================================ */
 app.post("/api/contact", async (req, res) => {
   const { name, email, phone, message } = req.body;
-
   if (!name || !email || !phone || !message) {
     return res
       .status(400)
@@ -156,16 +157,16 @@ app.post("/api/contact", async (req, res) => {
 });
 
 /* ============================================================
-   📦 API Routes
+   📦 Core API Routes
 ============================================================ */
-// ✅ Unified Stripe Billing + Webhook
+// ✅ Stripe Billing + Direct Debit Payments
 app.use("/api/billing", billingRouter);
 app.use("/api/payments", paymentsRouter);
 
-// ✅ Recurring Automation (Direct Debit)
+// ✅ Recurring Automation (Direct Debit charge scheduler)
 app.use("/api/automation", automationRouter);
 
-// ✅ Core Routers
+// ✅ Business Logic Routes
 app.use("/api/admin/quotes", adminQuotesRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
@@ -175,10 +176,10 @@ app.use("/api/responses", responsesRoutes);
 app.use("/api/packages", packagesRouter);
 app.use("/api/maintenance", maintenanceRouter);
 
-// ✅ Dedicated Order Diary
+// ✅ Order Diary + Notes
 app.use("/api/diary", orderDiaryRoutes);
 
-// ✅ Dual-Mount Quotes (Customer/Admin)
+// ✅ Dual Mount for Quotes (Admin + Customer)
 app.use("/api/customers", quotesCustomerRouter);
 app.use("/api/quotes", quotesAdminRouter);
 
@@ -203,7 +204,7 @@ const publicPath = path.join(__dirname, "public");
 app.use(express.static(publicPath));
 
 /* ============================================================
-   🌐 Health Check Endpoint
+   🌐 Health Check
 ============================================================ */
 app.get("/", (req, res) => {
   res.send(
@@ -212,11 +213,11 @@ app.get("/", (req, res) => {
 });
 
 /* ============================================================
-   🚀 Server Startup
+   🚀 Startup
 ============================================================ */
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Backend running on port: ${PORT}`);
+  console.log(`🚀 Backend running on port ${PORT}`);
   console.log("🌍 Allowed Origins:");
   allowedOrigins.forEach((o) => console.log("   •", o));
 });

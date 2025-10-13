@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * PJH Web Services — Stripe Payments & Billing (Unified 2025)
+ * PJH Web Services — Stripe Payments (Unified 2025)
  * ============================================================
  * ✅ Card & Bacs one-off payments
  * ✅ Direct Debit setup (mode: "setup")
@@ -30,7 +30,7 @@ const FRONTEND_URL =
     : "https://www.pjhwebservices.co.uk");
 
 /* ============================================================
-   🧮 Helpers
+   Helpers
 ============================================================ */
 function toNum(v, f = 0) {
   const n = Number(v);
@@ -40,62 +40,67 @@ function toNum(v, f = 0) {
 /* ============================================================
    📊 GET /api/payments/summary/:orderId
 ============================================================ */
-// inside routes/payments.js
 router.get("/summary/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
     const { rows } = await pool.query(
-      `SELECT o.id, o.title, o.deposit, o.balance, o.maintenance_id,
-              c.id AS customer_id, c.name AS customer_name, c.email,
+      `SELECT o.id, o.deposit, o.balance, o.total_paid, o.refunded_total, o.maintenance_id,
               c.direct_debit_active, c.stripe_mandate_id
        FROM orders o
        JOIN customers c ON c.id = o.customer_id
-       WHERE o.id = $1`,
+       WHERE o.id=$1`,
       [orderId]
     );
-    if (!rows.length) return res.status(404).json({ error: "Order not found" });
 
-    const order = rows[0];
-    const { rows: maint } = await pool.query(
-      `SELECT price FROM maintenance_plans WHERE id=$1`,
-      [order.maintenance_id]
+    if (!rows.length)
+      return res.status(404).json({ success: false, message: "Order not found" });
+
+    const o = rows[0];
+    const { rows: mRows } = await pool.query(
+      "SELECT price FROM maintenance_plans WHERE id=$1",
+      [o.maintenance_id]
     );
-    const maintenanceMonthly = Number(maint?.[0]?.price || 0);
+    const maintenanceMonthly = Number(mRows?.[0]?.price || 0);
 
-    // calculate outstanding amounts (same as before)
-    // …
+    // Financials
+    const deposit = toNum(o.deposit);
+    const balance = toNum(o.balance);
+    const paid = toNum(o.total_paid);
+    const refunded = Math.abs(toNum(o.refunded_total));
+    const total = deposit + balance;
+    const netPaid = paid - refunded;
+    const remaining = Math.max(total - netPaid, 0);
+
+    const deposit_outstanding = Math.max(deposit - netPaid, 0);
+    const balance_outstanding = Math.max(remaining - deposit_outstanding, 0);
 
     res.json({
       success: true,
       data: {
-        order_id: order.id,
+        order_id: o.id,
         deposit_outstanding,
         balance_outstanding,
         maintenance_monthly: maintenanceMonthly,
-        direct_debit_active: !!order.direct_debit_active,
-        mandate_id: order.stripe_mandate_id || null,
+        direct_debit_active: !!o.direct_debit_active,
+        mandate_id: o.stripe_mandate_id || null,
       },
     });
   } catch (err) {
     console.error("❌ payments summary error:", err);
-    res.status(500).json({ error: "Failed to build payments summary" });
+    res.status(500).json({ success: false, message: "Failed to build payment summary" });
   }
 });
-
 
 /* ============================================================
    💳 POST /api/payments/create-checkout
 ============================================================ */
 router.post("/create-checkout", async (req, res) => {
   try {
-    const { orderId, flow, type } = req.body;
+    const { orderId, flow, type, amount: reqAmount } = req.body;
     if (!orderId) return res.status(400).json({ error: "Missing orderId" });
-    if (flow !== "bacs_setup" && !type)
-      return res.status(400).json({ error: "Missing type" });
 
     const { rows } = await pool.query(
-      `SELECT o.*, c.id AS cid, c.name AS customer_name, c.email,
-              c.stripe_customer_id, c.stripe_mandate_id, c.direct_debit_active
+      `SELECT o.*, c.name AS customer_name, c.email, c.stripe_customer_id
        FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=$1`,
       [orderId]
     );
@@ -103,21 +108,23 @@ router.post("/create-checkout", async (req, res) => {
     const order = rows[0];
 
     const baseAmount =
-      req.body.amount ??
-      (type === "deposit" ? toNum(order.deposit) : toNum(order.balance));
+      reqAmount ?? (type === "deposit" ? toNum(order.deposit) : toNum(order.balance));
 
-    const { rows: summary } = await pool.query(
+    // Outstanding check
+    const { rows: paidRows } = await pool.query(
       `SELECT
          COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS paid,
          COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0) AS refunded
-       FROM payments WHERE order_id=$1 AND (type=$2 OR type='refund')`,
+       FROM payments WHERE order_id=$1 AND type=$2`,
       [order.id, type || "deposit"]
     );
-    const netPaid = Math.max(toNum(summary[0]?.paid) - Math.abs(toNum(summary[0]?.refunded)), 0);
+    const netPaid =
+      Math.max(toNum(paidRows[0]?.paid) - Math.abs(toNum(paidRows[0]?.refunded)), 0);
     const amount = Math.max(baseAmount - netPaid, 0);
     if (flow !== "bacs_setup" && amount <= 0)
       return res.status(400).json({ error: `No outstanding ${type} amount.` });
 
+    // Ensure Stripe customer
     let stripeCustomer = order.stripe_customer_id;
     if (!stripeCustomer) {
       const c = await stripe.customers.create({
@@ -126,10 +133,10 @@ router.post("/create-checkout", async (req, res) => {
         metadata: { order_id: orderId },
       });
       stripeCustomer = c.id;
-      await pool.query(
-        "UPDATE customers SET stripe_customer_id=$1 WHERE id=$2",
-        [c.id, order.customer_id]
-      );
+      await pool.query("UPDATE customers SET stripe_customer_id=$1 WHERE id=$2", [
+        c.id,
+        order.customer_id,
+      ]);
     }
 
     const mode = flow === "bacs_setup" ? "setup" : "payment";
@@ -193,12 +200,12 @@ router.post("/refund", async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM payments WHERE id=$1", [payment_id]);
     if (!rows.length) return res.status(404).json({ error: "Payment not found" });
-    const payment = rows[0];
-    if (!payment.reference)
+    const p = rows[0];
+    if (!p.reference)
       return res.status(400).json({ error: "No Stripe reference on payment." });
 
     const refund = await stripe.refunds.create({
-      payment_intent: payment.reference,
+      payment_intent: p.reference,
       amount: Math.round(Math.abs(Number(amount)) * 100),
       reason: "requested_by_customer",
     });
@@ -206,16 +213,10 @@ router.post("/refund", async (req, res) => {
     await pool.query(
       `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
        VALUES ($1,$2,$3,'refund',$4,'refunded',$5)`,
-      [
-        payment.order_id,
-        payment.customer_id,
-        -Math.abs(Number(amount)),
-        payment.method || "card",
-        refund.id,
-      ]
+      [p.order_id, p.customer_id, -Math.abs(Number(amount)), p.method || "card", refund.id]
     );
 
-    console.log(`💸 Refund recorded for order ${payment.order_id} (£${Number(amount).toFixed(2)})`);
+    console.log(`💸 Refund recorded for order ${p.order_id} (£${Number(amount).toFixed(2)})`);
     res.json({ success: true });
   } catch (err) {
     console.error("❌ Refund error:", err);
@@ -224,98 +225,81 @@ router.post("/refund", async (req, res) => {
 });
 
 /* ============================================================
-   ⚡ POST /api/payments/webhook — Stripe Webhook Handler
+   ⚡ POST /api/payments/webhook
 ============================================================ */
-router.post(
-  "/webhook",
-  bodyParser.raw({ type: "application/json" }),
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
-    } catch (err) {
-      console.error("❌ Webhook signature failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
+router.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req, res) => {
+  const sig = req.headers["stripe-signature"];
+  let event;
 
-    try {
-      switch (event.type) {
-        case "checkout.session.completed": {
-          const s = event.data.object;
-          const orderId = s.metadata?.order_id;
-          const paymentType = s.metadata?.payment_type || "deposit";
-          const method = s.payment_method_types?.[0] || "card";
-          const amount = (s.amount_total ?? 0) / 100;
-          if (orderId && amount > 0) {
-            await pool.query(
-              `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-               SELECT id, customer_id, $1, $2, $3, 'paid', $4 FROM orders WHERE id=$5`,
-              [amount, paymentType, method, s.payment_intent, orderId]
-            );
-            console.log(`💰 Payment logged: order #${orderId} £${amount}`);
-          }
-          break;
-        }
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error("❌ Webhook signature failed:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
 
-        case "setup_intent.succeeded": {
-          const si = event.data.object;
-          const paymentMethod = si.payment_method || null;
-          const mandate = si.mandate || null;
-          const customer = si.customer;
+  try {
+    switch (event.type) {
+      case "checkout.session.completed": {
+        const s = event.data.object;
+        const orderId = s.metadata?.order_id;
+        const paymentType = s.metadata?.payment_type || "deposit";
+        const method = s.payment_method_types?.[0] || "card";
+        const amount = (s.amount_total ?? 0) / 100;
+        if (orderId && amount > 0) {
           await pool.query(
-            `UPDATE customers 
-             SET stripe_mandate_id=$1, stripe_payment_method_id=$2, direct_debit_active=true 
-             WHERE stripe_customer_id=$3`,
-            [mandate, paymentMethod, customer]
+            `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+             SELECT id, customer_id, $1, $2, $3, 'paid', $4 FROM orders WHERE id=$5`,
+            [amount, paymentType, method, s.payment_intent, orderId]
           );
-          console.log(`🏦 Direct Debit setup complete for ${customer}`);
-          break;
+          console.log(`💰 Payment logged: order #${orderId} £${amount}`);
         }
-
-        case "payment_intent.succeeded": {
-          const pi = event.data.object;
-          const amount = (pi.amount_received || pi.amount || 0) / 100;
-          const orderId = pi.metadata?.order_id;
-          const type = pi.metadata?.payment_type || "maintenance";
-          if (orderId && amount > 0) {
-            const { rowCount } = await pool.query(
-              "UPDATE payments SET status='paid' WHERE reference=$1",
-              [pi.id]
-            );
-            if (!rowCount) {
-              await pool.query(
-                `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-                 SELECT id, customer_id, $1, $2, 'bacs', 'paid', $3 FROM orders WHERE id=$4`,
-                [amount, type, pi.id, orderId]
-              );
-            }
-            console.log(`🏁 Bacs Debit paid: Order #${orderId} — £${amount}`);
-          }
-          break;
-        }
-
-        case "payment_intent.payment_failed": {
-          const pi = event.data.object;
-          await pool.query("UPDATE payments SET status='failed' WHERE reference=$1", [pi.id]);
-          console.log(`❌ Bacs Debit failed: ${pi.id}`);
-          break;
-        }
-
-        default:
-          console.log(`ℹ️ Unhandled event: ${event.type}`);
+        break;
       }
 
-      res.json({ received: true });
-    } catch (err) {
-      console.error("❌ Webhook handler error:", err);
-      res.status(500).send("Webhook handler error");
+      case "setup_intent.succeeded": {
+        const si = event.data.object;
+        await pool.query(
+          `UPDATE customers 
+           SET stripe_mandate_id=$1, stripe_payment_method_id=$2, direct_debit_active=true 
+           WHERE stripe_customer_id=$3`,
+          [si.mandate, si.payment_method, si.customer]
+        );
+        console.log(`🏦 Direct Debit setup complete for ${si.customer}`);
+        break;
+      }
+
+      case "payment_intent.succeeded": {
+        const pi = event.data.object;
+        const orderId = pi.metadata?.order_id;
+        const amount = (pi.amount_received || pi.amount || 0) / 100;
+        if (orderId && amount > 0) {
+          await pool.query(
+            `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+             SELECT id, customer_id, $1, 'maintenance', 'bacs', 'paid', $2 FROM orders WHERE id=$3`,
+            [amount, pi.id, orderId]
+          );
+          console.log(`🏁 Bacs Debit paid: Order #${orderId} — £${amount}`);
+        }
+        break;
+      }
+
+      case "payment_intent.payment_failed": {
+        const pi = event.data.object;
+        await pool.query("UPDATE payments SET status='failed' WHERE reference=$1", [pi.id]);
+        console.log(`❌ Bacs Debit failed: ${pi.id}`);
+        break;
+      }
+
+      default:
+        console.log(`ℹ️ Unhandled event: ${event.type}`);
     }
+
+    res.json({ received: true });
+  } catch (err) {
+    console.error("❌ Webhook handler error:", err);
+    res.status(500).send("Webhook handler error");
   }
-);
+});
 
 export default router;
