@@ -83,13 +83,12 @@ export async function runMonthlyDirectDebit(orderIdOverride = null) {
         },
       });
 
-      await pool.query(
-        `
-        INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-        VALUES ($1,$2,$3,'maintenance','bacs','processing',$4)
-        `,
-        [cust.order_id, cust.customer_id, monthly, intent.id]
-      );
+await pool.query(
+  `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
+   VALUES ($1, $2, $3, 'maintenance', 'bacs', 'processing', $4, NOW())`,
+  [cust.order_id, cust.customer_id, cust.monthly_price, intent.id]
+);
+
 
       console.log(`✅ PaymentIntent created: ${intent.id} — £${monthly.toFixed(2)}`);
     } catch (err) {
