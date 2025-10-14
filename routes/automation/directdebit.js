@@ -145,49 +145,48 @@ router.get("/run", async (req, res) => {
         continue;
       }
 
-      // -------------------------------------------------------------------
-      // Create Direct Debit payment intent
-      // -------------------------------------------------------------------
-      console.log(`💳 Charging ${customer_name} £${monthlyAmount.toFixed(2)} via Direct Debit...`);
-      try {
-        const intent = await stripe.paymentIntents.create({
-          amount: Math.round(monthlyAmount * 100),
-          currency: "gbp",
-          customer: stripe_customer_id,
-          payment_method: paymentMethodId,
-          confirm: true,
-          mandate: mandateId,
-          description: `Monthly Maintenance — ${title}`,
-          automatic_payment_methods: {
-            enabled: true,
-            allow_redirects: "never",
-          },
-          metadata: {
-            order_id,
-            customer_id,
-            type: "maintenance",
-            source: "automation",
-          },
-        });
+ console.log(`💳 Charging ${customer_name} £${monthlyAmount.toFixed(2)} via Direct Debit...`);
+try {
+  const intent = await stripe.paymentIntents.create({
+    amount: Math.round(monthlyAmount * 100),
+    currency: "gbp",
+    customer: stripe_customer_id,
+    payment_method: paymentMethodId,
+    payment_method_types: ["bacs_debit"],  // ✅ Force Bacs Debit acceptance
+    confirm: true,
+    mandate: mandateId,
+    description: `Monthly Maintenance — ${title}`,
+    automatic_payment_methods: {
+      enabled: true,
+      allow_redirects: "never",
+    },
+    metadata: {
+      order_id,
+      customer_id,
+      type: "maintenance",
+      source: "automation",
+    },
+  });
 
-        const status = intent.status === "succeeded" ? "paid" : "processing";
+  const status = intent.status === "succeeded" ? "paid" : "processing";
 
-        await pool.query(
-          `INSERT INTO payments 
-             (order_id, customer_id, amount, type, method, status, reference, created_at)
-           VALUES ($1,$2,$3,'maintenance','bacs',$4,$5,NOW())
-           ON CONFLICT (reference) DO UPDATE SET status=$4;`,
-          [order_id, customer_id, monthlyAmount, status, intent.id]
-        );
+  await pool.query(
+    `INSERT INTO payments 
+       (order_id, customer_id, amount, type, method, status, reference, created_at)
+     VALUES ($1,$2,$3,'maintenance','bacs',$4,$5,NOW())
+     ON CONFLICT (reference) DO UPDATE SET status=$4;`,
+    [order_id, customer_id, monthlyAmount, status, intent.id]
+  );
 
-        console.log(
-          `✅ Direct Debit ${status === "paid" ? "success" : "processing"}: ${customer_name} — £${monthlyAmount}`
-        );
-        summary.charged++;
-      } catch (err) {
-        console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
-        summary.failed++;
-      }
+  console.log(
+    `✅ Direct Debit ${status === "paid" ? "success" : "processing"}: ${customer_name} — £${monthlyAmount}`
+  );
+  summary.charged++;
+} catch (err) {
+  console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
+  summary.failed++;
+}
+
     }
 
     // -------------------------------------------------------------------
