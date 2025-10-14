@@ -220,70 +220,49 @@ quotesAdminRouter.get("/:quoteId", async (req, res) => {
   }
 });
 
-// 🧩 Create Order from Quote (now fully synced with packages + maintenance)
+// 🧩 Create Order from Quote (Monthly builds + maintenance aware)
 quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   const { quoteId } = req.params;
   try {
-    // 1️⃣ Load the quote
     const q = await findQuote(quoteId);
     if (!q)
       return res.status(404).json({ success: false, message: "Quote not found." });
 
-    // 2️⃣ Prevent duplicate orders
     const existing = await pool.query("SELECT id FROM orders WHERE quote_id=$1", [quoteId]);
     if (existing.rows.length)
-      return res.json({
-        success: true,
-        order: existing.rows[0],
-        message: "Order already exists.",
-      });
+      return res.json({ success: true, order: existing.rows[0], message: "Order already exists." });
 
-    // 3️⃣ Live sync: fetch latest package + maintenance info
-    let packageMonthly = 0;
-    let packageName = q.package_name || null;
-    if (q.package_id) {
-      const { rows: pkgRows } = await pool.query(
-        "SELECT name, price_monthly FROM packages WHERE id=$1",
-        [q.package_id]
-      );
-      if (pkgRows.length) {
-        packageMonthly = pkgRows[0].price_monthly || 0;
-        packageName = pkgRows[0].name || packageName;
-      }
-    }
+    // 🔍 Load live package + maintenance data
+    const pkg = q.package_id
+      ? (await pool.query(`SELECT name, price_monthly FROM packages WHERE id=$1`, [q.package_id])).rows[0]
+      : null;
 
-    let maintenanceMonthly = 0;
-    let maintenanceName = q.maintenance_name || null;
-    if (q.maintenance_id) {
-      const { rows: maintRows } = await pool.query(
-        "SELECT name, price FROM maintenance_plans WHERE id=$1",
-        [q.maintenance_id]
-      );
-      if (maintRows.length) {
-        maintenanceMonthly = maintRows[0].price || 0;
-        maintenanceName = maintRows[0].name || maintenanceName;
-      }
-    }
+    const maint = q.maintenance_id
+      ? (await pool.query(`SELECT name, price FROM maintenance_plans WHERE id=$1`, [q.maintenance_id])).rows[0]
+      : null;
 
-    // 4️⃣ Calculate totals
+    // 💰 Totals
     const total = calcSubtotal(q.items);
     const deposit = Number(q.deposit ?? total * 0.5);
     const balance = Math.max(0, total - deposit);
 
-    // 5️⃣ Determine monthly amount for billing automation
-    const monthlyAmount =
-      q.pricing_mode === "monthly"
-        ? packageMonthly || maintenanceMonthly || 0
-        : maintenanceMonthly || 0;
+    // 🧾 Determine pricing mode
+    const isMonthlyBuild = !!pkg?.price_monthly;
+    const pricingMode = isMonthlyBuild ? "monthly" : "oneoff";
 
-    // 6️⃣ Create the order
+    // 🏗️ Monthly build + maintenance recurring setup
+    const monthlyAmount = isMonthlyBuild ? Number(pkg.price_monthly || 0) : 0;
+    const maintenanceMonthly = Number(maint?.price || 0);
+    const maintenanceName = maint?.name || null;
+
+    // 🏁 Insert order with full linkage
     const { rows } = await pool.query(
       `
       INSERT INTO orders (
         customer_id, quote_id, title, description, status, items, tasks,
         deposit, balance, diary,
-        pricing_mode, package_id, maintenance_id,
-        maintenance_name, maintenance_monthly, monthly_amount,
+        package_id, maintenance_id, pricing_mode,
+        monthly_amount, maintenance_name, maintenance_monthly,
         created_at, updated_at
       )
       VALUES (
@@ -300,23 +279,24 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
         JSON.stringify(toArray(q.items)),
         deposit,
         balance,
-        q.pricing_mode || "oneoff",
         q.package_id || null,
         q.maintenance_id || null,
+        pricingMode,
+        monthlyAmount,
         maintenanceName,
         maintenanceMonthly,
-        monthlyAmount,
       ]
     );
 
     const order = rows[0];
-    console.log(`✅ Order #${order.id} created from quote #${quoteId} (${q.pricing_mode})`);
+    console.log(`✅ Order #${order.id} created from quote #${quoteId} (${pricingMode})`);
     res.json({ success: true, order });
   } catch (err) {
     console.error("❌ Error creating order from quote:", err);
     res.status(500).json({ success: false, message: "Failed to create order from quote." });
   }
 });
+
 
 // ❌ Delete Quote (Admin)
 quotesAdminRouter.delete("/:quoteId", async (req, res) => {
