@@ -2,16 +2,14 @@
  * ============================================================
  * PJH Web Services — Quotes API (2025-10 Refined + Synced)
  * ============================================================
- * Streamlined quoting system with accurate package + maintenance
- * plan lookups. Automatically syncs correct pricing and names
- * from live tables when creating or converting quotes.
+ * Streamlined quoting + order creation pipeline.
  *
- * Enhancements:
- *   • Joins packages and maintenance_plans for accurate info
- *   • Ensures maintenance_monthly reflects live pricing
- *   • Returns both package_name and maintenance_name on admin view
- *   • Adds fallback for stale maintenance_id references
- *   • Includes DELETE support for both admin + customer
+ * Key Enhancements:
+ *  ✅ Live sync with packages & maintenance plans (accurate pricing)
+ *  ✅ Automatic population of maintenance_monthly + monthly_amount
+ *  ✅ Auto-create order with full billing info — no manual DB edits
+ *  ✅ Includes DELETE endpoints for both admin & customers
+ *  ✅ Works seamlessly with Direct Debit + automation billing flows
  * ============================================================
  */
 
@@ -57,17 +55,23 @@ quotesCustomerRouter.post("/:id/quotes", async (req, res) => {
 
     const quoteNumber = await generateQuoteNumber(id, cRows[0].business || cRows[0].name);
 
-    // Pull live package + maintenance data if provided
+    // 🔍 Pull live package + maintenance plan data
     const pkg = package_id
-      ? (await pool.query("SELECT name, price_oneoff FROM packages WHERE id=$1", [package_id]))
-          .rows[0]
+      ? (
+          await pool.query(
+            "SELECT name, price_oneoff, price_monthly FROM packages WHERE id=$1",
+            [package_id]
+          )
+        ).rows[0]
       : null;
 
     const maint = maintenance_id
-      ? (await pool.query("SELECT name, price FROM maintenance_plans WHERE id=$1", [maintenance_id]))
-          .rows[0]
+      ? (
+          await pool.query("SELECT name, price FROM maintenance_plans WHERE id=$1", [maintenance_id])
+        ).rows[0]
       : null;
 
+    // 💾 Insert quote
     const { rows } = await pool.query(
       `
       INSERT INTO quotes (
@@ -98,7 +102,11 @@ quotesCustomerRouter.post("/:id/quotes", async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Quote created successfully.",
-      quote: { ...rows[0], package: pkg?.name, maintenance: maint?.name },
+      quote: {
+        ...rows[0],
+        package_name: pkg?.name,
+        maintenance_name: maint?.name,
+      },
     });
   } catch (err) {
     console.error("❌ Error creating quote:", err);
@@ -188,7 +196,7 @@ quotesAdminRouter.get("/:quoteId", async (req, res) => {
              c.email AS customer_email, c.phone AS customer_phone,
              c.address1, c.address2, c.city, c.county, c.postcode,
              o.id AS order_id,
-             p.name AS package_name, p.price_oneoff AS package_price,
+             p.name AS package_name, p.price_oneoff AS package_price, p.price_monthly AS package_monthly,
              m.name AS maintenance_name, m.price AS maintenance_monthly
       FROM quotes q
       JOIN customers c ON q.customer_id = c.id
@@ -212,16 +220,16 @@ quotesAdminRouter.get("/:quoteId", async (req, res) => {
   }
 });
 
-// 🧩 Create Order from Quote (Improved & Fixed ReferenceError)
+// 🧩 Create Order from Quote (now fully synced with packages + maintenance)
 quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   const { quoteId } = req.params;
   try {
-    // 1️⃣ Load the quote using your helper
+    // 1️⃣ Load the quote
     const q = await findQuote(quoteId);
     if (!q)
       return res.status(404).json({ success: false, message: "Quote not found." });
 
-    // 2️⃣ Prevent duplicates
+    // 2️⃣ Prevent duplicate orders
     const existing = await pool.query("SELECT id FROM orders WHERE quote_id=$1", [quoteId]);
     if (existing.rows.length)
       return res.json({
@@ -230,13 +238,25 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
         message: "Order already exists.",
       });
 
-    // 3️⃣ Load live maintenance pricing if applicable
+    // 3️⃣ Live sync: fetch latest package + maintenance info
+    let packageMonthly = 0;
+    let packageName = q.package_name || null;
+    if (q.package_id) {
+      const { rows: pkgRows } = await pool.query(
+        "SELECT name, price_monthly FROM packages WHERE id=$1",
+        [q.package_id]
+      );
+      if (pkgRows.length) {
+        packageMonthly = pkgRows[0].price_monthly || 0;
+        packageName = pkgRows[0].name || packageName;
+      }
+    }
+
     let maintenanceMonthly = 0;
     let maintenanceName = q.maintenance_name || null;
-
     if (q.maintenance_id) {
       const { rows: maintRows } = await pool.query(
-        `SELECT name, price FROM maintenance_plans WHERE id = $1;`,
+        "SELECT name, price FROM maintenance_plans WHERE id=$1",
         [q.maintenance_id]
       );
       if (maintRows.length) {
@@ -245,20 +265,31 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
       }
     }
 
-    // 4️⃣ Calculate totals correctly
+    // 4️⃣ Calculate totals
     const total = calcSubtotal(q.items);
     const deposit = Number(q.deposit ?? total * 0.5);
     const balance = Math.max(0, total - deposit);
 
-    // 5️⃣ Create the order
+    // 5️⃣ Determine monthly amount for billing automation
+    const monthlyAmount =
+      q.pricing_mode === "monthly"
+        ? packageMonthly || maintenanceMonthly || 0
+        : maintenanceMonthly || 0;
+
+    // 6️⃣ Create the order
     const { rows } = await pool.query(
       `
       INSERT INTO orders (
         customer_id, quote_id, title, description, status, items, tasks,
-        deposit, balance, diary, maintenance_name, maintenance_monthly,
+        deposit, balance, diary,
+        pricing_mode, package_id, maintenance_id,
+        maintenance_name, maintenance_monthly, monthly_amount,
         created_at, updated_at
       )
-      VALUES ($1,$2,$3,$4,'in_progress',$5,'[]',$6,$7,'[]',$8,$9,NOW(),NOW())
+      VALUES (
+        $1,$2,$3,$4,'in_progress',$5,'[]',$6,$7,'[]',
+        $8,$9,$10,$11,$12,$13,NOW(),NOW()
+      )
       RETURNING *;
       `,
       [
@@ -269,13 +300,17 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
         JSON.stringify(toArray(q.items)),
         deposit,
         balance,
+        q.pricing_mode || "oneoff",
+        q.package_id || null,
+        q.maintenance_id || null,
         maintenanceName,
         maintenanceMonthly,
+        monthlyAmount,
       ]
     );
 
     const order = rows[0];
-    console.log(`✅ Order #${order.id} created from quote #${quoteId}`);
+    console.log(`✅ Order #${order.id} created from quote #${quoteId} (${q.pricing_mode})`);
     res.json({ success: true, order });
   } catch (err) {
     console.error("❌ Error creating order from quote:", err);
@@ -283,14 +318,15 @@ quotesAdminRouter.post("/:quoteId/create-order", async (req, res) => {
   }
 });
 
-
 // ❌ Delete Quote (Admin)
 quotesAdminRouter.delete("/:quoteId", async (req, res) => {
   const { quoteId } = req.params;
   try {
     const { rowCount } = await pool.query("DELETE FROM quotes WHERE id=$1;", [quoteId]);
     if (rowCount === 0)
-      return res.status(404).json({ success: false, message: "Quote not found or already deleted." });
+      return res
+        .status(404)
+        .json({ success: false, message: "Quote not found or already deleted." });
 
     console.log(`🗑️ Admin deleted quote ${quoteId}`);
     res.json({ success: true, message: `Quote ${quoteId} deleted successfully.` });
