@@ -161,7 +161,7 @@ app.post("/api/contact", async (req, res) => {
 ============================================================ */
 // ✅ Stripe Billing + Direct Debit Payments
 app.use("/api/billing", billingRouter);
-app.use("/api/payments", paymentsRouter);
+app.use("/api/payments", express.json(), paymentsRouter);
 
 // ✅ Recurring Automation (Direct Debit charge scheduler)
 app.use("/api/automation", automationRouter);
