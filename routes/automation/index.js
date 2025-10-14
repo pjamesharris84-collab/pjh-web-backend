@@ -6,6 +6,6 @@ const router = express.Router();
 
 // Distinct endpoints for clarity
 router.use("/directdebit", directDebitRouter);          // → /api/automation/directdebit/run
-router.use("/directdebit-build", directDebitBuildRouter); // → /api/automation/directdebit-build/run
+router.use("/directdebit", directDebitBuildRouter);
 
 export default router;
