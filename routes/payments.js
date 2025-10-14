@@ -205,72 +205,46 @@ router.post("/refund", async (req, res) => {
 });
 
 /* ============================================================
-   📊 GET /api/payments/summary/:orderId — Admin UI totals
+   📊 GET /api/payments/summary/:orderId
+   Returns full payment + direct debit metadata for Admin UI
 ============================================================ */
 router.get("/summary/:orderId", async (req, res) => {
   const { orderId } = req.params;
-
   try {
-    // Ensure order exists
-    const { rows: orderRows } = await pool.query(
+    const { rows } = await pool.query(
       `
       SELECT 
-        o.id,
+        o.id AS order_id,
         o.customer_id,
-        o.deposit,
-        o.balance,
         o.maintenance_name,
         o.maintenance_monthly,
-        o.monthly_amount AS build_monthly,
+        o.monthly_amount,
         c.direct_debit_active,
         c.stripe_customer_id,
-        c.stripe_mandate_id,
-        c.stripe_payment_method_id
+        c.stripe_payment_method_id,
+        c.stripe_mandate_id AS mandate_id,
+        (
+          SELECT COALESCE(SUM(amount),0) 
+          FROM payments 
+          WHERE order_id=o.id AND status='paid'
+        ) AS total_paid
       FROM orders o
-      JOIN customers c ON c.id = o.customer_id
-      WHERE o.id = $1
-      LIMIT 1;
+      JOIN customers c ON c.id=o.customer_id
+      WHERE o.id=$1
       `,
       [orderId]
     );
 
-    if (!orderRows.length)
-      return res.status(404).json({ success: false, message: "Order not found" });
+    if (!rows.length)
+      return res.status(404).json({ success: false, error: "Order not found" });
 
-    const order = orderRows[0];
-
-    // Aggregate payments
-    const { rows: payRows } = await pool.query(
-      `
-      SELECT 
-        COALESCE(SUM(CASE WHEN type IN ('deposit','balance','build','maintenance') AND status='paid' THEN amount ELSE 0 END),0) AS total_paid,
-        COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0) AS refunded_total,
-        COALESCE(SUM(CASE WHEN type='deposit' AND status='paid' THEN amount ELSE 0 END),0) AS deposit_paid,
-        COALESCE(SUM(CASE WHEN type='balance' AND status='paid' THEN amount ELSE 0 END),0) AS balance_paid
-      FROM payments
-      WHERE order_id = $1;
-      `,
-      [orderId]
-    );
-
-    const totals = payRows[0] || {};
-    const depositOutstanding = Math.max(Number(order.deposit || 0) - Number(totals.deposit_paid || 0), 0);
-    const balanceOutstanding = Math.max(Number(order.balance || 0) - Number(totals.balance_paid || 0), 0);
-
-    res.json({
-      success: true,
-      data: {
-        ...order,
-        deposit_outstanding: depositOutstanding,
-        balance_outstanding: balanceOutstanding,
-        refunded_total: Math.abs(totals.refunded_total || 0),
-        total_paid: Number(totals.total_paid || 0),
-      },
-    });
+    const summary = rows[0];
+    res.json({ success: true, data: summary });
   } catch (err) {
     console.error("❌ Error fetching payment summary:", err);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: "Failed to load summary" });
   }
 });
+
 
 export default router;
