@@ -1,11 +1,11 @@
 import express from "express";
 import directDebitRouter from "./directdebit.js";
-import directDebitBuildRouter from "./directdebitBuild.js"; 
+import directDebitBuildRouter from "./directdebitBuild.js";
 
 const router = express.Router();
 
-// Mount correctly at /api/automation/directdebit/...
-router.use("/directdebit", directDebitRouter);
-router.use("/directdebit", directDebitBuildRouter);
+// Distinct endpoints for clarity
+router.use("/directdebit", directDebitRouter);          // → /api/automation/directdebit/run
+router.use("/directdebit-build", directDebitBuildRouter); // → /api/automation/directdebit-build/run
 
 export default router;

@@ -7,7 +7,7 @@
  *  ✅ Secure CORS for Local, Render, and Live
  *  ✅ Stripe webhooks (raw-body safe)
  *  ✅ Unified Payments + Billing routers
- *  ✅ Automated Direct Debit billing route
+ *  ✅ Automated Direct Debit billing routes
  *  ✅ Email-powered contact form
  *  ✅ Static assets for PDFs/logos
  * ============================================================
@@ -49,16 +49,19 @@ const app = express();
 /* ============================================================
    ⚡ Stripe Webhooks — Mount before JSON parsing
 ============================================================ */
+// The raw body must be preserved for Stripe signature verification
 app.use(
   "/api/billing/webhook",
   bodyParser.raw({ type: "application/json" }),
   billingRouter
 );
-app.use(
-  "/api/payments/webhook",
-  bodyParser.raw({ type: "application/json" }),
-  paymentsRouter
-);
+
+// Legacy endpoint: gracefully deprecated
+app.post("/api/payments/webhook", (req, res) => {
+  res
+    .status(410)
+    .json({ message: "Deprecated. Use /api/billing/webhook instead." });
+});
 
 /* ============================================================
    🌍 CORS Configuration (Local + Live + Render)
@@ -161,7 +164,7 @@ app.post("/api/contact", async (req, res) => {
 ============================================================ */
 // ✅ Stripe Billing + Direct Debit Payments
 app.use("/api/billing", billingRouter);
-app.use("/api/payments", express.json(), paymentsRouter);
+app.use("/api/payments", paymentsRouter);
 
 // ✅ Recurring Automation (Direct Debit charge scheduler)
 app.use("/api/automation", automationRouter);
