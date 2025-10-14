@@ -69,7 +69,6 @@ router.get("/orders/:id/payments", async (req, res) => {
   }
 });
 
-
 /* ============================================================
    💳 POST /api/payments/create-checkout
 ============================================================ */
@@ -169,7 +168,7 @@ router.post("/create-checkout", async (req, res) => {
 });
 
 /* ============================================================
-   💸 POST /api/payments/refund
+   💸 POST /api/payments/refund — Stripe refund + record
 ============================================================ */
 router.post("/refund", async (req, res) => {
   const { payment_id, amount } = req.body;
@@ -190,16 +189,87 @@ router.post("/refund", async (req, res) => {
     });
 
     await pool.query(
-      `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-       VALUES ($1,$2,$3,'refund',$4,'refunded',$5)`,
+      `
+      INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+      VALUES ($1,$2,$3,'refund',$4,'refunded',$5);
+      `,
       [p.order_id, p.customer_id, -Math.abs(Number(amount)), p.method || "card", refund.id]
     );
 
-    console.log(`💸 Refund recorded for order ${p.order_id} (£${Number(amount).toFixed(2)})`);
-    res.json({ success: true });
+    console.log(`💸 Refund processed for order ${p.order_id}: £${Number(amount).toFixed(2)}`);
+    res.json({ success: true, message: "Refund processed successfully." });
   } catch (err) {
     console.error("❌ Refund error:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+/* ============================================================
+   📊 GET /api/payments/summary/:orderId — Admin UI totals
+============================================================ */
+router.get("/summary/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+
+  try {
+    // Ensure order exists
+    const { rows: orderRows } = await pool.query(
+      `
+      SELECT 
+        o.id,
+        o.customer_id,
+        o.deposit,
+        o.balance,
+        o.maintenance_name,
+        o.maintenance_monthly,
+        o.monthly_amount AS build_monthly,
+        c.direct_debit_active,
+        c.stripe_customer_id,
+        c.stripe_mandate_id,
+        c.stripe_payment_method_id
+      FROM orders o
+      JOIN customers c ON c.id = o.customer_id
+      WHERE o.id = $1
+      LIMIT 1;
+      `,
+      [orderId]
+    );
+
+    if (!orderRows.length)
+      return res.status(404).json({ success: false, message: "Order not found" });
+
+    const order = orderRows[0];
+
+    // Aggregate payments
+    const { rows: payRows } = await pool.query(
+      `
+      SELECT 
+        COALESCE(SUM(CASE WHEN type IN ('deposit','balance','build','maintenance') AND status='paid' THEN amount ELSE 0 END),0) AS total_paid,
+        COALESCE(SUM(CASE WHEN status='refunded' THEN amount ELSE 0 END),0) AS refunded_total,
+        COALESCE(SUM(CASE WHEN type='deposit' AND status='paid' THEN amount ELSE 0 END),0) AS deposit_paid,
+        COALESCE(SUM(CASE WHEN type='balance' AND status='paid' THEN amount ELSE 0 END),0) AS balance_paid
+      FROM payments
+      WHERE order_id = $1;
+      `,
+      [orderId]
+    );
+
+    const totals = payRows[0] || {};
+    const depositOutstanding = Math.max(Number(order.deposit || 0) - Number(totals.deposit_paid || 0), 0);
+    const balanceOutstanding = Math.max(Number(order.balance || 0) - Number(totals.balance_paid || 0), 0);
+
+    res.json({
+      success: true,
+      data: {
+        ...order,
+        deposit_outstanding: depositOutstanding,
+        balance_outstanding: balanceOutstanding,
+        refunded_total: Math.abs(totals.refunded_total || 0),
+        total_paid: Number(totals.total_paid || 0),
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error fetching payment summary:", err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
