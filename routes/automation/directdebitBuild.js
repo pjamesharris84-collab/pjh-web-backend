@@ -1,11 +1,16 @@
 /**
  * ============================================================
- * PJH Web — Automated Direct Debit (Monthly Builds)
+ * PJH Web Services — Automated Direct Debit (Monthly Builds)
  * ============================================================
- * Triggers monthly website build charges via Stripe Bacs Debit.
- * Logs a "monthly_build" payment in DB.
+ * Handles:
+ *  ✅ Monthly website build recharges (Stripe Bacs)
+ *  ✅ Uses orders.monthly_amount (set automatically on creation)
+ *  ✅ Full DB logging for payments (type = 'build')
+ *  ✅ Auto-repairs missing Stripe IDs
+ *  ✅ Skips safely if customer not eligible
  * ============================================================
  */
+
 import express from "express";
 import pool from "../../db.js";
 import Stripe from "stripe";
@@ -16,23 +21,22 @@ const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /* ============================================================
-   ⚡ GET /api/automation/directdebit/build-run?orderId=##
+   ⚡ GET /api/automation/directdebit/build-run?orderId=13
 ============================================================ */
 router.get("/build-run", async (req, res) => {
   console.log("🏗️ Starting Monthly Build Direct Debit billing...");
   const { orderId } = req.query;
 
-  let totals = { totalChecked: 0, charged: 0, skipped: 0, failed: 0 };
-
   try {
-    // 1) Find orders that are monthly & have an active mandate
-    let q = `
+    // ------------------------------------------------------------
+    // Load orders eligible for monthly build billing
+    // ------------------------------------------------------------
+    let query = `
       SELECT 
         o.id AS order_id,
         o.title,
         o.monthly_amount,
         o.customer_id,
-        o.pricing_mode,
         c.name AS customer_name,
         c.email AS customer_email,
         c.stripe_customer_id,
@@ -42,24 +46,32 @@ router.get("/build-run", async (req, res) => {
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
       WHERE c.direct_debit_active = TRUE
-        AND o.pricing_mode = 'monthly'
+        AND o.monthly_amount > 0
     `;
+
     const params = [];
     if (orderId) {
-      q += " AND o.id = $1";
+      query += " AND o.id = $1";
       params.push(orderId);
     }
 
-    const { rows } = await pool.query(q, params);
+    const { rows } = await pool.query(query, params);
+
     if (!rows.length) {
-      console.log("⚠️ No active monthly build customers found.");
-      return res.json({ success: true, message: "No active monthly builds found." });
+      console.log("⚠️ No eligible monthly build customers found.");
+      return res.json({ success: true, message: "No active build DD customers found." });
     }
 
-    // 2) Charge each order
-    for (const row of rows) {
-      totals.totalChecked++;
+    // ------------------------------------------------------------
+    // Process each eligible order
+    // ------------------------------------------------------------
+    let totalChecked = 0,
+      charged = 0,
+      skipped = 0,
+      failed = 0;
 
+    for (const row of rows) {
+      totalChecked++;
       const {
         order_id,
         title,
@@ -71,64 +83,105 @@ router.get("/build-run", async (req, res) => {
         stripe_mandate_id,
       } = row;
 
-      const amount = Number(monthly_amount || 0);
-      if (!amount || amount <= 0) {
-        totals.skipped++;
-        console.log(`⬇️ Skipped ${customer_name} — no monthly amount set.`);
+      if (!stripe_customer_id) {
+        console.warn(`⚠️ Skipped ${customer_name}: Missing Stripe customer ID.`);
+        skipped++;
         continue;
       }
 
-      if (!stripe_customer_id || !stripe_payment_method_id || !stripe_mandate_id) {
-        totals.skipped++;
-        console.warn(`⚠️ Skipped ${customer_name}: Missing Stripe linkage.`);
+      // Auto-repair Stripe IDs if missing
+      let paymentMethodId = stripe_payment_method_id;
+      let mandateId = stripe_mandate_id;
+
+      if (!paymentMethodId) {
+        const methods = await stripe.paymentMethods.list({
+          customer: stripe_customer_id,
+          type: "bacs_debit",
+        });
+        if (methods.data?.length) {
+          paymentMethodId = methods.data[0].id;
+          await pool.query(
+            `UPDATE customers SET stripe_payment_method_id=$1 WHERE stripe_customer_id=$2`,
+            [paymentMethodId, stripe_customer_id]
+          );
+          console.log(`🔄 Auto-updated payment method for ${customer_name}: ${paymentMethodId}`);
+        }
+      }
+
+      if (!mandateId && paymentMethodId) {
+        const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+        if (pm?.bacs_debit?.mandate) {
+          mandateId = pm.bacs_debit.mandate;
+          await pool.query(
+            `UPDATE customers SET stripe_mandate_id=$1 WHERE stripe_customer_id=$2`,
+            [mandateId, stripe_customer_id]
+          );
+          console.log(`🔄 Auto-updated mandate for ${customer_name}: ${mandateId}`);
+        }
+      }
+
+      if (!paymentMethodId || !mandateId) {
+        console.warn(`⚠️ Skipped ${customer_name}: Missing Stripe linkage`);
+        skipped++;
         continue;
       }
 
+      // ------------------------------------------------------------
+      // Create PaymentIntent via Stripe Bacs
+      // ------------------------------------------------------------
       try {
-        console.log(`💳 Charging ${customer_name} £${amount.toFixed(2)} (monthly build)…`);
+        console.log(
+          `💳 Charging ${customer_name} £${monthly_amount.toFixed(
+            2
+          )} for Monthly Build (Order #${order_id})...`
+        );
 
-        // Use automatic_payment_methods so we don't need a return_url
         const intent = await stripe.paymentIntents.create({
-          amount: Math.round(amount * 100),
+          amount: Math.round(monthly_amount * 100),
           currency: "gbp",
           customer: stripe_customer_id,
-          payment_method: stripe_payment_method_id,
-          mandate: stripe_mandate_id,
+          payment_method: paymentMethodId,
           confirm: true,
+          mandate: mandateId,
           description: `Monthly Website Build — ${title}`,
+          automatic_payment_methods: { enabled: true, allow_redirects: "never" },
           metadata: {
             order_id,
             customer_id,
-            type: "monthly_build",
+            payment_type: "build",
             source: "automation",
-          },
-          automatic_payment_methods: {
-            enabled: true,
-            allow_redirects: "never",
           },
         });
 
-        // Record as processing (will flip to paid/failed via webhook)
+        // ------------------------------------------------------------
+        // Log to database
+        // ------------------------------------------------------------
+        const status =
+          intent.status === "succeeded" ? "paid" : intent.status === "processing" ? "processing" : "pending";
+
         await pool.query(
           `
-          INSERT INTO payments 
-            (order_id, customer_id, amount, type, method, status, reference, created_at)
-          VALUES ($1,$2,$3,'monthly_build','bacs_debit','processing',$4,NOW())
-          ON CONFLICT (reference) DO NOTHING;
-          `,
-          [order_id, customer_id, amount, intent.id]
+          INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
+          VALUES ($1,$2,$3,'build','bacs_debit',$4,$5,NOW())
+          ON CONFLICT (reference) DO UPDATE SET status=$4;
+        `,
+          [order_id, customer_id, monthly_amount, status, intent.id]
         );
 
-        totals.charged++;
-        console.log(`✅ DD queued: ${customer_name} — £${amount} (${intent.status})`);
+        charged++;
+        console.log(`✅ Direct Debit charge ${intent.status}: ${customer_name} — £${monthly_amount}`);
       } catch (err) {
-        totals.failed++;
+        failed++;
         console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
       }
     }
 
-    console.table(totals);
-    res.json({ success: true, message: "Monthly build batch run complete.", totals });
+    // ------------------------------------------------------------
+    // Done
+    // ------------------------------------------------------------
+    console.table({ totalChecked, charged, skipped, failed });
+    console.log("🏁 Monthly build billing cycle complete.");
+    res.json({ success: true, message: "Monthly build run complete" });
   } catch (err) {
     console.error("❌ Monthly build automation failed:", err);
     res.status(500).json({ success: false, error: err.message });
