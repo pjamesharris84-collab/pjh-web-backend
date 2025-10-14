@@ -29,7 +29,7 @@ router.get("/build-run", async (req, res) => {
 
   try {
     // ------------------------------------------------------------
-    // Load orders eligible for monthly build billing
+    // Load eligible orders
     // ------------------------------------------------------------
     let query = `
       SELECT 
@@ -46,6 +46,7 @@ router.get("/build-run", async (req, res) => {
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
       WHERE c.direct_debit_active = TRUE
+        AND o.monthly_amount IS NOT NULL
         AND o.monthly_amount > 0
     `;
 
@@ -83,7 +84,6 @@ router.get("/build-run", async (req, res) => {
         stripe_mandate_id,
       } = row;
 
-      // Safely cast monthly_amount to number
       const monthlyAmount = Number(monthly_amount) || 0;
       if (isNaN(monthlyAmount) || monthlyAmount <= 0) {
         console.warn(`⚠️ Skipped ${customer_name}: Invalid monthly amount (${monthly_amount})`);
@@ -137,7 +137,7 @@ router.get("/build-run", async (req, res) => {
       }
 
       // ------------------------------------------------------------
-      // Create PaymentIntent via Stripe Bacs
+      // Create Direct Debit charge via Stripe
       // ------------------------------------------------------------
       try {
         console.log(
@@ -151,10 +151,10 @@ router.get("/build-run", async (req, res) => {
           currency: "gbp",
           customer: stripe_customer_id,
           payment_method: paymentMethodId,
+          payment_method_types: ["bacs_debit"], // ✅ FIXED — explicitly allowed
           confirm: true,
           mandate: mandateId,
           description: `Monthly Website Build — ${title}`,
-          automatic_payment_methods: { enabled: true, allow_redirects: "never" },
           metadata: {
             order_id,
             customer_id,
@@ -164,7 +164,7 @@ router.get("/build-run", async (req, res) => {
         });
 
         // ------------------------------------------------------------
-        // Log payment in database
+        // Log payment in DB
         // ------------------------------------------------------------
         const status =
           intent.status === "succeeded"
@@ -195,9 +195,6 @@ router.get("/build-run", async (req, res) => {
       }
     }
 
-    // ------------------------------------------------------------
-    // Done
-    // ------------------------------------------------------------
     console.table({ totalChecked, charged, skipped, failed });
     console.log("🏁 Monthly build billing cycle complete.");
     res.json({ success: true, message: "Monthly build run complete" });
