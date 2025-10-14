@@ -37,73 +37,52 @@ function toNum(v, f = 0) {
   return Number.isFinite(n) ? n : f;
 }
 
-/* ============================================================
-   📊 GET /api/payments/summary/:orderId
-   Returns totals + mandate + monthly amount
-============================================================ */
+// ============================================================
+// 📊 GET /api/payments/summary/:orderId
+// ============================================================
 router.get("/summary/:orderId", async (req, res) => {
   const { orderId } = req.params;
-
   try {
-    // Get base order + customer + maintenance link
     const { rows } = await pool.query(
       `
-      SELECT 
-        o.id, o.title, o.deposit, o.balance, o.maintenance_id,
-        c.id AS customer_id, c.name AS customer_name, c.email,
-        c.direct_debit_active, c.stripe_mandate_id
+      SELECT
+        o.id AS order_id,
+        o.deposit,
+        o.balance,
+        o.maintenance_monthly,
+        o.maintenance_id,
+        o.pricing_mode,
+        c.id AS customer_id,
+        c.name AS customer_name,
+        c.direct_debit_active,
+        c.stripe_mandate_id AS mandate_id,
+        c.stripe_customer_id AS stripe_customer_id,
+        c.stripe_payment_method_id AS stripe_payment_method_id,
+        COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS total_paid,
+        COALESCE(SUM(CASE WHEN p.status='refunded' THEN p.amount ELSE 0 END),0) AS refunded_total,
+        (o.deposit + o.balance) - COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS balance_outstanding,
+        GREATEST(o.deposit - COALESCE(SUM(CASE WHEN p.type='deposit' AND p.status='paid' THEN p.amount ELSE 0 END),0), 0) AS deposit_outstanding
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
+      LEFT JOIN payments p ON p.order_id = o.id
       WHERE o.id = $1
+      GROUP BY o.id, o.deposit, o.balance, o.maintenance_monthly, o.maintenance_id, o.pricing_mode,
+               c.id, c.name, c.direct_debit_active, c.stripe_mandate_id, c.stripe_customer_id, c.stripe_payment_method_id;
       `,
       [orderId]
     );
 
-    if (!rows.length)
+    if (!rows.length) {
       return res.status(404).json({ success: false, message: "Order not found" });
+    }
 
-    const order = rows[0];
-
-    // Monthly maintenance
-    const { rows: maint } = await pool.query(
-      "SELECT price FROM maintenance_plans WHERE id=$1",
-      [order.maintenance_id]
-    );
-    const maintenanceMonthly = Number(maint?.[0]?.price || 0);
-
-    // Calculate paid + refunded
-    const { rows: payStats } = await pool.query(
-      `
-      SELECT
-        COALESCE(SUM(CASE WHEN status='paid' AND type='deposit' THEN amount END), 0) AS deposit_paid,
-        COALESCE(SUM(CASE WHEN status='paid' AND type='balance' THEN amount END), 0) AS balance_paid,
-        COALESCE(SUM(CASE WHEN status='refunded' THEN amount END), 0) AS refunded_total
-      FROM payments
-      WHERE order_id = $1
-      `,
-      [orderId]
-    );
-
-    const stats = payStats[0];
-    const depositOutstanding = Math.max(order.deposit - stats.deposit_paid, 0);
-    const balanceOutstanding = Math.max(order.balance - stats.balance_paid, 0);
-
-    res.json({
-      success: true,
-      data: {
-        order_id: order.id,
-        deposit_outstanding: depositOutstanding,
-        balance_outstanding: balanceOutstanding,
-        maintenance_monthly: maintenanceMonthly,
-        direct_debit_active: !!order.direct_debit_active,
-        mandate_id: order.stripe_mandate_id || null,
-      },
-    });
+    res.json({ success: true, data: rows[0] });
   } catch (err) {
     console.error("❌ payments summary error:", err);
-    res.status(500).json({ error: "Failed to build payments summary" });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
+
 
 /* ============================================================
    💳 POST /api/payments/create-checkout
