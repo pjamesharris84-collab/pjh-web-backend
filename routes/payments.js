@@ -171,38 +171,72 @@ router.post("/create-checkout", async (req, res) => {
    💸 POST /api/payments/refund — Stripe refund + record
 ============================================================ */
 router.post("/refund", async (req, res) => {
-  const { payment_id, amount } = req.body;
-  if (!payment_id || !amount)
-    return res.status(400).json({ error: "Missing payment_id or amount" });
-
   try {
-    const { rows } = await pool.query("SELECT * FROM payments WHERE id=$1", [payment_id]);
-    if (!rows.length) return res.status(404).json({ error: "Payment not found" });
-    const p = rows[0];
-    if (!p.reference)
-      return res.status(400).json({ error: "No Stripe reference on payment." });
+    const { payment_id, amount } = req.body;
+    if (!payment_id || !amount)
+      return res.status(400).json({ error: "Missing payment_id or amount" });
 
-    const refund = await stripe.refunds.create({
-      payment_intent: p.reference,
-      amount: Math.round(Math.abs(Number(amount)) * 100),
-      reason: "requested_by_customer",
-    });
+    const refundAmount = Number(amount);
+    if (!(refundAmount > 0))
+      return res.status(400).json({ error: "Invalid refund amount" });
 
-    await pool.query(
-      `
-      INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-      VALUES ($1,$2,$3,'refund',$4,'refunded',$5);
-      `,
-      [p.order_id, p.customer_id, -Math.abs(Number(amount)), p.method || "card", refund.id]
+    // Get order_id from the payment being refunded
+    const { rows: [payment] } = await pool.query(
+      `SELECT order_id, stripe_payment_intent_id, amount AS original_amount
+       FROM payments WHERE id = $1`,
+      [payment_id]
+    );
+    if (!payment)
+      return res.status(404).json({ error: "Original payment not found" });
+
+    const { order_id } = payment;
+
+    // Calculate total paid & refunded for this order
+    const { rows: totals } = await pool.query(
+      `SELECT 
+         COALESCE(SUM(CASE WHEN type != 'refund' AND status = 'paid' THEN amount ELSE 0 END),0) AS total_paid,
+         COALESCE(SUM(CASE WHEN type = 'refund' AND status = 'refunded' THEN amount ELSE 0 END),0) AS total_refunded
+       FROM payments
+       WHERE order_id = $1`,
+      [order_id]
     );
 
-    console.log(`💸 Refund processed for order ${p.order_id}: £${Number(amount).toFixed(2)}`);
-    res.json({ success: true, message: "Refund processed successfully." });
+    const totalPaid = Number(totals[0].total_paid || 0);
+    const totalRefunded = Number(totals[0].total_refunded || 0);
+    const remainingRefundable = totalPaid - totalRefunded;
+
+    if (refundAmount > remainingRefundable) {
+      return res.status(400).json({
+        error: `Refund exceeds remaining refundable amount (£${remainingRefundable.toFixed(2)}).`,
+      });
+    }
+
+    // ✅ Proceed with Stripe refund as before
+    const refund = await stripe.refunds.create({
+      payment_intent: payment.stripe_payment_intent_id,
+      amount: Math.round(refundAmount * 100),
+    });
+
+    // Insert a refund record (positive amount)
+    await pool.query(
+      `INSERT INTO payments 
+         (order_id, customer_id, amount, type, method, stripe_refund_id, created_by, status)
+       VALUES ($1, NULL, $2, 'refund', 'stripe', $3, 'system', 'refunded')`,
+      [order_id, refundAmount, refund.id]
+    );
+
+    return res.json({
+      success: true,
+      refund_id: refund.id,
+      amount: refundAmount,
+      order_id,
+    });
   } catch (err) {
     console.error("❌ Refund error:", err);
     res.status(500).json({ error: err.message });
   }
 });
+
 
 /* ============================================================
    📊 GET /api/payments/summary/:orderId
