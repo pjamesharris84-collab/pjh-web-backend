@@ -89,7 +89,9 @@ router.get("/build-run", async (req, res) => {
         continue;
       }
 
+      // ------------------------------------------------------------
       // Auto-repair Stripe IDs if missing
+      // ------------------------------------------------------------
       let paymentMethodId = stripe_payment_method_id;
       let mandateId = stripe_mandate_id;
 
@@ -154,22 +156,27 @@ router.get("/build-run", async (req, res) => {
         });
 
         // ------------------------------------------------------------
-        // Log to database
+        // Log payment in database (corrected version)
         // ------------------------------------------------------------
         const status =
-          intent.status === "succeeded" ? "paid" : intent.status === "processing" ? "processing" : "pending";
+          intent.status === "succeeded"
+            ? "paid"
+            : intent.status === "processing"
+            ? "processing"
+            : "pending";
 
         await pool.query(
           `
-          INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
+          INSERT INTO payments 
+            (order_id, customer_id, amount, type, method, status, reference, created_at)
           VALUES ($1,$2,$3,'build','bacs_debit',$4,$5,NOW())
           ON CONFLICT (reference) DO UPDATE SET status=$4;
-        `,
+          `,
           [order_id, customer_id, monthly_amount, status, intent.id]
         );
 
         charged++;
-        console.log(`✅ Direct Debit charge ${intent.status}: ${customer_name} — £${monthly_amount}`);
+        console.log(`✅ Direct Debit (Build) logged: ${customer_name} — £${monthly_amount} (${status})`);
       } catch (err) {
         failed++;
         console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
