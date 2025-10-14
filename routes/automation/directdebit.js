@@ -6,8 +6,8 @@
  *  ✅ Monthly maintenance and subscription recharges
  *  ✅ Stripe Direct Debit automation (Bacs)
  *  ✅ Logs payments in DB (type = 'maintenance')
- *  ✅ Full visibility in AdminOrderRecord
- *  ✅ Defensive checks for missing IDs
+ *  ✅ Auto-updates in AdminOrderRecord via webhook polling
+ *  ✅ Defensive checks & auto-repair for missing Stripe IDs
  * ============================================================
  */
 
@@ -22,6 +22,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 /* ============================================================
    ⚡ GET /api/automation/directdebit/run?orderId=10
+   Triggers monthly Bacs Direct Debit billing
 ============================================================ */
 router.get("/run", async (req, res) => {
   console.log("🏦 Starting Direct Debit billing...");
@@ -29,7 +30,7 @@ router.get("/run", async (req, res) => {
 
   try {
     // -------------------------------------------------------------------
-    // Load customers to bill (filtered by direct_debit_active)
+    // Load customers eligible for Direct Debit billing
     // -------------------------------------------------------------------
     let query = `
       SELECT 
@@ -57,12 +58,12 @@ router.get("/run", async (req, res) => {
 
     const { rows } = await pool.query(query, params);
     if (!rows.length) {
-      console.log("⚠️ No active DD customers found.");
+      console.log("⚠️ No active Direct Debit customers found.");
       return res.json({ success: true, message: "No active DD customers found." });
     }
 
     // -------------------------------------------------------------------
-    // Iterate through eligible customers
+    // Iterate through each customer and charge via Stripe
     // -------------------------------------------------------------------
     for (const row of rows) {
       const {
@@ -82,17 +83,57 @@ router.get("/run", async (req, res) => {
         continue;
       }
 
-      if (!stripe_customer_id || !stripe_payment_method_id || !stripe_mandate_id) {
-        console.warn(`⚠️ Skipped ${customer_name}: Missing Stripe linkage.
-          Customer ID: ${stripe_customer_id || "❌"}
-          Payment Method: ${stripe_payment_method_id || "❌"}
-          Mandate: ${stripe_mandate_id || "❌"}
+      // -------------------------------------------------------------------
+      // Validate Stripe linkage — fetch missing IDs if possible
+      // -------------------------------------------------------------------
+      let paymentMethodId = stripe_payment_method_id;
+      let mandateId = stripe_mandate_id;
+
+      if (!stripe_customer_id) {
+        console.warn(`⚠️ Skipped ${customer_name}: Missing Stripe customer ID.`);
+        continue;
+      }
+
+      // Attempt to auto-repair missing payment or mandate
+      if (!paymentMethodId) {
+        const methods = await stripe.paymentMethods.list({
+          customer: stripe_customer_id,
+          type: "bacs_debit",
+        });
+        if (methods.data?.length) {
+          paymentMethodId = methods.data[0].id;
+          await pool.query(
+            `UPDATE customers SET stripe_payment_method_id=$1 WHERE stripe_customer_id=$2`,
+            [paymentMethodId, stripe_customer_id]
+          );
+          console.log(`🔄 Auto-updated payment method for ${customer_name}: ${paymentMethodId}`);
+        }
+      }
+
+      if (!mandateId) {
+        // try fetching from Stripe customer mandates if available
+        const pm = paymentMethodId ? await stripe.paymentMethods.retrieve(paymentMethodId) : null;
+        if (pm?.bacs_debit?.mandate) {
+          mandateId = pm.bacs_debit.mandate;
+          await pool.query(
+            `UPDATE customers SET stripe_mandate_id=$1 WHERE stripe_customer_id=$2`,
+            [mandateId, stripe_customer_id]
+          );
+          console.log(`🔄 Auto-updated mandate for ${customer_name}: ${mandateId}`);
+        }
+      }
+
+      if (!paymentMethodId || !mandateId) {
+        console.warn(`⚠️ Skipped ${customer_name}: Missing linkage
+          Customer: ${stripe_customer_id}
+          PaymentMethod: ${paymentMethodId || "❌"}
+          Mandate: ${mandateId || "❌"}
         `);
         continue;
       }
 
       // -------------------------------------------------------------------
-      // Create Direct Debit charge via Stripe
+      // Create Direct Debit payment intent
       // -------------------------------------------------------------------
       console.log(`💳 Charging ${customer_name} £${monthlyAmount.toFixed(2)} via Direct Debit...`);
       try {
@@ -100,10 +141,10 @@ router.get("/run", async (req, res) => {
           amount: Math.round(monthlyAmount * 100),
           currency: "gbp",
           customer: stripe_customer_id,
-          payment_method: stripe_payment_method_id,
+          payment_method: paymentMethodId,
           confirm: true,
+          mandate: mandateId,
           description: `Monthly Maintenance — ${title}`,
-          mandate: stripe_mandate_id,
           metadata: {
             order_id,
             customer_id,
@@ -113,26 +154,22 @@ router.get("/run", async (req, res) => {
         });
 
         // -------------------------------------------------------------------
-        // Log the payment in database
+        // Log the payment in database immediately as "processing" or "paid"
+        // (webhook will later update to 'paid' or 'failed')
         // -------------------------------------------------------------------
-        if (intent.status === "succeeded" || intent.status === "processing") {
-          await pool.query(
-            `INSERT INTO payments 
+        const status = intent.status === "succeeded" ? "paid" : "processing";
+
+        await pool.query(
+          `INSERT INTO payments 
              (order_id, customer_id, amount, type, method, status, reference, created_at)
-             VALUES ($1,$2,$3,'maintenance','bacs',$4,$5,NOW())
-             ON CONFLICT (reference) DO NOTHING;`,
-            [
-              order_id,
-              customer_id,
-              monthlyAmount,
-              intent.status === "succeeded" ? "paid" : "processing",
-              intent.id,
-            ]
-          );
-          console.log(`✅ Direct Debit success: ${customer_name} — £${monthlyAmount} (${intent.status})`);
-        } else {
-          console.warn(`⚠️ Stripe intent created but not succeeded: ${intent.status}`);
-        }
+           VALUES ($1,$2,$3,'maintenance','bacs',$4,$5,NOW())
+           ON CONFLICT (reference) DO UPDATE SET status=$4;`,
+          [order_id, customer_id, monthlyAmount, status, intent.id]
+        );
+
+        console.log(
+          `✅ Direct Debit queued: ${customer_name} — £${monthlyAmount} (${intent.status})`
+        );
       } catch (err) {
         console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
       }

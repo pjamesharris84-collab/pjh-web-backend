@@ -1,10 +1,11 @@
 /**
  * ============================================================
- * PJH Web Services — Billing & Subscription API (2025)
+ * PJH Web Services — Unified Billing & Subscription API (2025)
  * ============================================================
- * ✅ Monthly build & maintenance via Stripe Subscription
- * ✅ Direct Debit (BACS) or Card supported
- * ✅ Webhook listener for invoices/subscriptions
+ * ✅ Stripe Checkout for Monthly Build & Maintenance
+ * ✅ Direct Debit (BACS) or Card payments
+ * ✅ Subscription and Invoice support
+ * ✅ Webhook-driven status updates (processing / paid / failed)
  * ============================================================
  */
 
@@ -18,11 +19,11 @@ dotenv.config();
 
 const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const FRONTEND_URL =
-  process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk";
 
 /* ============================================================
    💳 POST /api/billing/checkout
+   Creates a Stripe Checkout session for a package or plan
 ============================================================ */
 router.post("/checkout", async (req, res) => {
   try {
@@ -30,9 +31,8 @@ router.post("/checkout", async (req, res) => {
     if (!orderId || !customerId)
       return res.status(400).json({ error: "orderId and customerId are required" });
 
-    const { rows: cRows } = await pool.query("SELECT * FROM customers WHERE id=$1", [
-      customerId,
-    ]);
+    // 1️⃣ Fetch customer or create in Stripe
+    const { rows: cRows } = await pool.query("SELECT * FROM customers WHERE id=$1", [customerId]);
     const customer = cRows[0];
     if (!customer) return res.status(404).json({ error: "Customer not found" });
 
@@ -50,6 +50,7 @@ router.post("/checkout", async (req, res) => {
       ]);
     }
 
+    // 2️⃣ Build line items
     const line_items = [];
     if (packageId) {
       const { rows: pRows } = await pool.query(
@@ -60,6 +61,7 @@ router.post("/checkout", async (req, res) => {
         return res.status(400).json({ error: "Invalid package" });
       line_items.push({ price: pRows[0].stripe_price_id, quantity: 1 });
     }
+
     if (maintenanceId) {
       const { rows: mRows } = await pool.query(
         "SELECT name, stripe_price_id FROM maintenance_plans WHERE id=$1 AND visible=TRUE",
@@ -69,9 +71,10 @@ router.post("/checkout", async (req, res) => {
         return res.status(400).json({ error: "Invalid maintenance plan" });
       line_items.push({ price: mRows[0].stripe_price_id, quantity: 1 });
     }
-    if (!line_items.length)
-      return res.status(400).json({ error: "No valid line items" });
 
+    if (!line_items.length) return res.status(400).json({ error: "No valid line items" });
+
+    // 3️⃣ Create checkout session
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: stripeCustomerId,
@@ -80,15 +83,9 @@ router.post("/checkout", async (req, res) => {
       success_url: `${FRONTEND_URL}/billing/success?order=${orderId}`,
       cancel_url: `${FRONTEND_URL}/billing/cancel?order=${orderId}`,
       subscription_data: {
-        metadata: {
-          pjh_order_id: String(orderId),
-          pjh_customer_id: String(customerId),
-        },
+        metadata: { order_id: String(orderId), customer_id: String(customerId) },
       },
-      metadata: {
-        pjh_order_id: String(orderId),
-        pjh_customer_id: String(customerId),
-      },
+      metadata: { order_id: String(orderId), customer_id: String(customerId) },
     });
 
     console.log(`✅ Checkout session created for order ${orderId}`);
@@ -101,7 +98,7 @@ router.post("/checkout", async (req, res) => {
 
 /* ============================================================
    🧾 POST /api/billing/webhook
-   Unified Webhook for Payments + Direct Debit + Subscriptions
+   Unified Webhook for Direct Debit + Payments + Subscriptions
 ============================================================ */
 router.post(
   "/webhook",
@@ -111,11 +108,7 @@ router.post(
     let event;
 
     try {
-      event = stripe.webhooks.constructEvent(
-        req.body,
-        sig,
-        process.env.STRIPE_WEBHOOK_SECRET
-      );
+      event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     } catch (err) {
       console.error("❌ Webhook signature verification failed:", err.message);
       return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -126,7 +119,7 @@ router.post(
     try {
       switch (event.type) {
         /* ========================================================
-           ✅ One-off Payments via Checkout (Card/Bacs)
+           ✅ Checkout Session Completed (one-off payments)
         ========================================================= */
         case "checkout.session.completed": {
           const s = event.data.object;
@@ -137,11 +130,9 @@ router.post(
 
           if (orderId && amount > 0) {
             await pool.query(
-              `
-              INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
-              SELECT id, customer_id, $1, $2, $3, 'paid', $4, NOW()
-              FROM orders WHERE id=$5
-              `,
+              `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
+               SELECT id, customer_id, $1, $2, $3, 'paid', $4, NOW()
+               FROM orders WHERE id=$5`,
               [amount, paymentType, method, s.payment_intent, orderId]
             );
             console.log(`💰 Payment logged: Order #${orderId} — £${amount}`);
@@ -150,76 +141,83 @@ router.post(
         }
 
         /* ========================================================
-           🏦 Direct Debit Setup Complete
+           🏦 Direct Debit Mandate Setup Completed
         ========================================================= */
         case "setup_intent.succeeded": {
           const si = event.data.object;
-          const paymentMethod = si.payment_method || null;
           const mandate = si.mandate || null;
-          const customer = si.customer;
+          const paymentMethod = si.payment_method || null;
+          const customerId = si.customer;
 
-          if (customer) {
+          if (customerId) {
             await pool.query(
               `UPDATE customers 
                SET stripe_mandate_id=$1, stripe_payment_method_id=$2, direct_debit_active=true 
                WHERE stripe_customer_id=$3`,
-              [mandate, paymentMethod, customer]
+              [mandate, paymentMethod, customerId]
             );
-            console.log(`🏦 Direct Debit setup complete for ${customer}`);
+            console.log(`🏦 Direct Debit setup complete — ${customerId}`);
           }
           break;
         }
 
         /* ========================================================
-           💸 Direct Debit or Recurring Charge (Maintenance)
+           💸 Direct Debit / Recurring Payments
+           Includes processing → succeeded → failed
         ========================================================= */
+        case "payment_intent.processing": {
+          const pi = event.data.object;
+          const orderId = pi.metadata?.order_id;
+          const amount = (pi.amount || 0) / 100;
+
+          if (orderId) {
+            await pool.query(
+              `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
+               SELECT id, customer_id, $2, 'maintenance', 'bacs', 'processing', $3, NOW()
+               FROM orders WHERE id=$1
+               ON CONFLICT (reference) DO UPDATE SET status='processing';`,
+              [orderId, amount, pi.id]
+            );
+            console.log(`🕓 Direct Debit processing: Order #${orderId} — £${amount}`);
+          }
+          break;
+        }
+
         case "payment_intent.succeeded": {
           const pi = event.data.object;
-          const amount = (pi.amount_received || pi.amount || 0) / 100;
           const orderId = pi.metadata?.order_id;
-          const type = pi.metadata?.payment_type || "maintenance";
+          const amount = (pi.amount_received || pi.amount || 0) / 100;
 
-          if (orderId && amount > 0) {
-            const { rowCount } = await pool.query(
-              "UPDATE payments SET status='paid' WHERE reference=$1",
-              [pi.id]
+          if (orderId) {
+            await pool.query(
+              `UPDATE payments SET status='paid', amount=$2 WHERE reference=$1;
+               INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
+               SELECT id, customer_id, $2, 'maintenance', 'bacs', 'paid', $1, NOW()
+               FROM orders WHERE id=$3
+               ON CONFLICT (reference) DO NOTHING;`,
+              [pi.id, amount, orderId]
             );
-            if (!rowCount) {
-              await pool.query(
-                `
-                INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference, created_at)
-                SELECT id, customer_id, $1, $2, 'bacs', 'paid', $3, NOW()
-                FROM orders WHERE id=$4
-                `,
-                [amount, type, pi.id, orderId]
-              );
-            }
-            console.log(`🏁 Bacs/Direct Debit charge success: Order #${orderId} — £${amount}`);
+            console.log(`✅ Direct Debit succeeded: Order #${orderId} — £${amount}`);
+          }
+          break;
+        }
+
+        case "payment_intent.payment_failed": {
+          const pi = event.data.object;
+          const orderId = pi.metadata?.order_id;
+          if (orderId && pi.id) {
+            await pool.query("UPDATE payments SET status='failed' WHERE reference=$1", [pi.id]);
+            console.log(`❌ Direct Debit failed: Order #${orderId}`);
           }
           break;
         }
 
         /* ========================================================
-           ⚠️ Payment Failed
-        ========================================================= */
-        case "payment_intent.payment_failed": {
-          const pi = event.data.object;
-          await pool.query(
-            "UPDATE payments SET status='failed' WHERE reference=$1",
-            [pi.id]
-          );
-          console.log(`❌ Payment failed: ${pi.id}`);
-          break;
-        }
-
-        /* ========================================================
-           🧾 Invoice or Subscription Events
+           🧾 Invoices & Subscriptions
         ========================================================= */
         case "invoice.payment_succeeded": {
           const inv = event.data.object;
-          const amount = (inv.amount_paid || 0) / 100;
-          const subId = inv.subscription;
-          console.log(`💰 Invoice paid: £${amount} (sub: ${subId})`);
+          console.log(`💰 Invoice paid: £${(inv.amount_paid || 0) / 100}`);
           break;
         }
 
@@ -242,7 +240,7 @@ router.post(
         }
 
         /* ========================================================
-           (Default)
+           Default / Unhandled
         ========================================================= */
         default:
           console.log(`ℹ️ Unhandled Stripe event: ${event.type}`);
@@ -255,6 +253,5 @@ router.post(
     }
   }
 );
-
 
 export default router;
