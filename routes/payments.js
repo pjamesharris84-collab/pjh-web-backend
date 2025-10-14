@@ -37,55 +37,35 @@ function toNum(v, f = 0) {
   return Number.isFinite(n) ? n : f;
 }
 
-// ============================================================
-// 📊 GET /api/payments/summary/:orderId
-// ============================================================
-router.get("/summary/:orderId", async (req, res) => {
-  const { orderId } = req.params;
+/* ============================================================
+   💳 GET /api/orders/:id/payments — Unified payment history
+============================================================ */
+router.get("/orders/:id/payments", async (req, res) => {
+  const { id } = req.params;
+
   try {
     const { rows } = await pool.query(
       `
-      SELECT
-        o.id AS order_id,
-        o.title,
-        o.deposit,
-        o.balance,
-        o.maintenance_id,
-        o.maintenance_monthly,
-        c.id AS customer_id,
-        c.name AS customer_name,
-        c.direct_debit_active,
-        c.stripe_mandate_id AS mandate_id,
-        c.stripe_customer_id AS stripe_customer_id,
-        c.stripe_payment_method_id AS stripe_payment_method_id,
-        COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS total_paid,
-        COALESCE(SUM(CASE WHEN p.status='refunded' THEN p.amount ELSE 0 END),0) AS refunded_total,
-        (COALESCE(o.deposit,0) + COALESCE(o.balance,0)) 
-          - COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS balance_outstanding,
-        GREATEST(
-          COALESCE(o.deposit,0)
-          - COALESCE(SUM(CASE WHEN p.type='deposit' AND p.status='paid' THEN p.amount ELSE 0 END),0),
-          0
-        ) AS deposit_outstanding
-      FROM orders o
-      JOIN customers c ON c.id = o.customer_id
-      LEFT JOIN payments p ON p.order_id = o.id
-      WHERE o.id = $1
-      GROUP BY o.id, o.title, o.deposit, o.balance, o.maintenance_id, o.maintenance_monthly,
-               c.id, c.name, c.direct_debit_active, c.stripe_mandate_id, 
-               c.stripe_customer_id, c.stripe_payment_method_id;
+      SELECT 
+        p.id,
+        p.order_id,
+        p.amount,
+        p.type,
+        p.method,
+        p.status,
+        p.reference,
+        p.created_at
+      FROM payments p
+      WHERE p.order_id = $1
+      ORDER BY p.created_at DESC;
       `,
-      [orderId]
+      [id]
     );
 
-    if (!rows.length) {
-      return res.status(404).json({ success: false, message: "Order not found" });
-    }
-
-    res.json({ success: true, data: rows[0] });
+    res.json({ success: true, payments: rows });
   } catch (err) {
-    console.error("❌ payments summary error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    console.error("❌ Error fetching payments:", err);
+    res.status(500).json({ success: false, error: "Failed to load payments." });
   }
 });
 
