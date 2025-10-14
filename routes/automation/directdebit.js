@@ -23,7 +23,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 /* ============================================================
    ⚡ GET /api/automation/directdebit/run?orderId=10
 ============================================================ */
-router.get("/directdebit/run", async (req, res) => {
+router.get("/run", async (req, res) => {
   console.log("🏦 Starting Direct Debit billing...");
   const { orderId } = req.query;
 
