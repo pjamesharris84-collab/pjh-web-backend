@@ -47,11 +47,11 @@ router.get("/summary/:orderId", async (req, res) => {
       `
       SELECT
         o.id AS order_id,
+        o.title,
         o.deposit,
         o.balance,
-        o.maintenance_monthly,
         o.maintenance_id,
-        o.pricing_mode,
+        o.maintenance_monthly,
         c.id AS customer_id,
         c.name AS customer_name,
         c.direct_debit_active,
@@ -60,14 +60,20 @@ router.get("/summary/:orderId", async (req, res) => {
         c.stripe_payment_method_id AS stripe_payment_method_id,
         COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS total_paid,
         COALESCE(SUM(CASE WHEN p.status='refunded' THEN p.amount ELSE 0 END),0) AS refunded_total,
-        (o.deposit + o.balance) - COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS balance_outstanding,
-        GREATEST(o.deposit - COALESCE(SUM(CASE WHEN p.type='deposit' AND p.status='paid' THEN p.amount ELSE 0 END),0), 0) AS deposit_outstanding
+        (COALESCE(o.deposit,0) + COALESCE(o.balance,0)) 
+          - COALESCE(SUM(CASE WHEN p.status='paid' THEN p.amount ELSE 0 END),0) AS balance_outstanding,
+        GREATEST(
+          COALESCE(o.deposit,0)
+          - COALESCE(SUM(CASE WHEN p.type='deposit' AND p.status='paid' THEN p.amount ELSE 0 END),0),
+          0
+        ) AS deposit_outstanding
       FROM orders o
       JOIN customers c ON c.id = o.customer_id
       LEFT JOIN payments p ON p.order_id = o.id
       WHERE o.id = $1
-      GROUP BY o.id, o.deposit, o.balance, o.maintenance_monthly, o.maintenance_id, o.pricing_mode,
-               c.id, c.name, c.direct_debit_active, c.stripe_mandate_id, c.stripe_customer_id, c.stripe_payment_method_id;
+      GROUP BY o.id, o.title, o.deposit, o.balance, o.maintenance_id, o.maintenance_monthly,
+               c.id, c.name, c.direct_debit_active, c.stripe_mandate_id, 
+               c.stripe_customer_id, c.stripe_payment_method_id;
       `,
       [orderId]
     );
