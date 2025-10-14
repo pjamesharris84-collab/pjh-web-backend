@@ -1,6 +1,9 @@
 import express from "express";
-import directdebit from "./directdebit.js";
+import directDebitRouter from "./directdebit.js";
 
 const router = express.Router();
-router.use("/directdebit", directdebit);
+
+// 🧩 Mount sub-routes
+router.use("/directdebit", directDebitRouter);
+
 export default router;
