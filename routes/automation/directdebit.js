@@ -8,6 +8,7 @@
  *  ✅ Logs payments in DB (type = 'maintenance')
  *  ✅ Auto-updates in AdminOrderRecord via webhook polling
  *  ✅ Defensive checks & auto-repair for missing Stripe IDs
+ *  ✅ Summary reporting (charged / skipped / failed)
  * ============================================================
  */
 
@@ -27,6 +28,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 router.get("/run", async (req, res) => {
   console.log("🏦 Starting Direct Debit billing...");
   const { orderId } = req.query;
+
+  let summary = {
+    totalChecked: 0,
+    charged: 0,
+    skipped: 0,
+    failed: 0,
+  };
 
   try {
     // -------------------------------------------------------------------
@@ -63,9 +71,11 @@ router.get("/run", async (req, res) => {
     }
 
     // -------------------------------------------------------------------
-    // Iterate through each customer and charge via Stripe
+    // Iterate through each eligible customer
     // -------------------------------------------------------------------
     for (const row of rows) {
+      summary.totalChecked++;
+
       const {
         order_id,
         title,
@@ -80,21 +90,23 @@ router.get("/run", async (req, res) => {
       const monthlyAmount = Number(maintenance_monthly || 0);
       if (!monthlyAmount || monthlyAmount <= 0) {
         console.log(`⬇️ Skipped ${customer_name} — no monthly maintenance set.`);
+        summary.skipped++;
         continue;
       }
 
       // -------------------------------------------------------------------
-      // Validate Stripe linkage — fetch missing IDs if possible
+      // Validate Stripe linkage — auto-repair if missing
       // -------------------------------------------------------------------
       let paymentMethodId = stripe_payment_method_id;
       let mandateId = stripe_mandate_id;
 
       if (!stripe_customer_id) {
         console.warn(`⚠️ Skipped ${customer_name}: Missing Stripe customer ID.`);
+        summary.skipped++;
         continue;
       }
 
-      // Attempt to auto-repair missing payment or mandate
+      // Attempt to recover payment method
       if (!paymentMethodId) {
         const methods = await stripe.paymentMethods.list({
           customer: stripe_customer_id,
@@ -110,9 +122,9 @@ router.get("/run", async (req, res) => {
         }
       }
 
-      if (!mandateId) {
-        // try fetching from Stripe customer mandates if available
-        const pm = paymentMethodId ? await stripe.paymentMethods.retrieve(paymentMethodId) : null;
+      // Attempt to recover mandate
+      if (!mandateId && paymentMethodId) {
+        const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
         if (pm?.bacs_debit?.mandate) {
           mandateId = pm.bacs_debit.mandate;
           await pool.query(
@@ -129,6 +141,7 @@ router.get("/run", async (req, res) => {
           PaymentMethod: ${paymentMethodId || "❌"}
           Mandate: ${mandateId || "❌"}
         `);
+        summary.skipped++;
         continue;
       }
 
@@ -145,6 +158,10 @@ router.get("/run", async (req, res) => {
           confirm: true,
           mandate: mandateId,
           description: `Monthly Maintenance — ${title}`,
+          automatic_payment_methods: {
+            enabled: true,
+            allow_redirects: "never",
+          },
           metadata: {
             order_id,
             customer_id,
@@ -153,10 +170,6 @@ router.get("/run", async (req, res) => {
           },
         });
 
-        // -------------------------------------------------------------------
-        // Log the payment in database immediately as "processing" or "paid"
-        // (webhook will later update to 'paid' or 'failed')
-        // -------------------------------------------------------------------
         const status = intent.status === "succeeded" ? "paid" : "processing";
 
         await pool.query(
@@ -168,15 +181,26 @@ router.get("/run", async (req, res) => {
         );
 
         console.log(
-          `✅ Direct Debit queued: ${customer_name} — £${monthlyAmount} (${intent.status})`
+          `✅ Direct Debit ${status === "paid" ? "success" : "processing"}: ${customer_name} — £${monthlyAmount}`
         );
+        summary.charged++;
       } catch (err) {
         console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
+        summary.failed++;
       }
     }
 
+    // -------------------------------------------------------------------
+    // Final summary
+    // -------------------------------------------------------------------
     console.log("🏁 Direct Debit billing cycle complete.");
-    res.json({ success: true, message: "Batch run complete" });
+    console.table(summary);
+
+    res.json({
+      success: true,
+      message: "Batch run complete",
+      summary,
+    });
   } catch (err) {
     console.error("❌ Direct Debit automation failed:", err);
     res.status(500).json({ success: false, error: err.message });
