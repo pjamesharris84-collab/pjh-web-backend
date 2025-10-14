@@ -39,57 +39,89 @@ function toNum(v, f = 0) {
 
 /* ============================================================
    📊 GET /api/payments/summary/:orderId
+   Unified live summary (no refunded_total column required)
 ============================================================ */
 router.get("/summary/:orderId", async (req, res) => {
   try {
     const { orderId } = req.params;
+
+    // ──────────────────────────────
+    // 1️⃣ Load core order + customer
+    // ──────────────────────────────
     const { rows } = await pool.query(
-      `SELECT o.id, o.deposit, o.balance, o.total_paid, o.refunded_total, o.maintenance_id,
+      `SELECT o.id, o.title, o.deposit, o.balance, o.maintenance_id,
+              o.customer_id,
+              c.name AS customer_name, c.email,
               c.direct_debit_active, c.stripe_mandate_id
        FROM orders o
        JOIN customers c ON c.id = o.customer_id
-       WHERE o.id=$1`,
+       WHERE o.id = $1`,
       [orderId]
     );
 
     if (!rows.length)
       return res.status(404).json({ success: false, message: "Order not found" });
 
-    const o = rows[0];
-    const { rows: mRows } = await pool.query(
-      "SELECT price FROM maintenance_plans WHERE id=$1",
-      [o.maintenance_id]
-    );
-    const maintenanceMonthly = Number(mRows?.[0]?.price || 0);
+    const order = rows[0];
 
-    // Financials
-    const deposit = toNum(o.deposit);
-    const balance = toNum(o.balance);
-    const paid = toNum(o.total_paid);
-    const refunded = Math.abs(toNum(o.refunded_total));
+    // ──────────────────────────────
+    // 2️⃣ Compute maintenance price
+    // ──────────────────────────────
+    const { rows: maintRows } = await pool.query(
+      `SELECT price FROM maintenance_plans WHERE id=$1`,
+      [order.maintenance_id]
+    );
+    const maintenanceMonthly = Number(maintRows?.[0]?.price || 0);
+
+    // ──────────────────────────────
+    // 3️⃣ Calculate total paid + refunded
+    // ──────────────────────────────
+    const { rows: payRows } = await pool.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS paid_total,
+         COALESCE(SUM(CASE WHEN status='refunded' THEN ABS(amount) ELSE 0 END),0) AS refunded_total
+       FROM payments
+       WHERE order_id=$1`,
+      [orderId]
+    );
+    const paid = Number(payRows[0].paid_total || 0);
+    const refunded = Number(payRows[0].refunded_total || 0);
+
+    // ──────────────────────────────
+    // 4️⃣ Compute outstanding values
+    // ──────────────────────────────
+    const deposit = Number(order.deposit || 0);
+    const balance = Number(order.balance || 0);
     const total = deposit + balance;
-    const netPaid = paid - refunded;
+    const netPaid = Math.max(paid - refunded, 0);
     const remaining = Math.max(total - netPaid, 0);
 
-    const deposit_outstanding = Math.max(deposit - netPaid, 0);
-    const balance_outstanding = Math.max(remaining - deposit_outstanding, 0);
+    const depositOutstanding = Math.max(deposit - paid, 0);
+    const balanceOutstanding = Math.max(balance - (paid - deposit), 0);
 
+    // ──────────────────────────────
+    // 5️⃣ Response
+    // ──────────────────────────────
     res.json({
       success: true,
       data: {
-        order_id: o.id,
-        deposit_outstanding,
-        balance_outstanding,
+        order_id: order.id,
+        deposit_outstanding: depositOutstanding,
+        balance_outstanding: balanceOutstanding,
         maintenance_monthly: maintenanceMonthly,
-        direct_debit_active: !!o.direct_debit_active,
-        mandate_id: o.stripe_mandate_id || null,
+        direct_debit_active: !!order.direct_debit_active,
+        mandate_id: order.stripe_mandate_id || null,
+        total_paid: paid,
+        refunded_total: refunded,
+        remaining_balance: remaining,
       },
     });
   } catch (err) {
     console.error("❌ payments summary error:", err);
-    res.status(500).json({ success: false, message: "Failed to build payment summary" });
+    res.status(500).json({ error: "Failed to build payments summary" });
   }
 });
+
 
 /* ============================================================
    💳 POST /api/payments/create-checkout
