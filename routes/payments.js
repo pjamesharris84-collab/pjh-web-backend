@@ -181,13 +181,16 @@ router.post("/refund", async (req, res) => {
       return res.status(400).json({ error: "Invalid refund amount" });
 
     // Get order_id from the payment being refunded
-    const { rows: [payment] } = await pool.query(
-      `SELECT order_id, stripe_payment_intent_id, amount AS original_amount
-       FROM payments WHERE id = $1`,
-      [payment_id]
-    );
-    if (!payment)
-      return res.status(404).json({ error: "Original payment not found" });
+    // Fetch the original payment (for order + stripe reference)
+const { rows: [payment] } = await pool.query(
+  `SELECT order_id, stripe_payment_id, amount AS original_amount
+   FROM payments
+   WHERE id = $1`,
+  [payment_id]
+);
+if (!payment)
+  return res.status(404).json({ error: "Original payment not found" });
+
 
     const { order_id } = payment;
 
@@ -212,10 +215,11 @@ router.post("/refund", async (req, res) => {
     }
 
     // ✅ Proceed with Stripe refund as before
-    const refund = await stripe.refunds.create({
-      payment_intent: payment.stripe_payment_intent_id,
-      amount: Math.round(refundAmount * 100),
-    });
+const refund = await stripe.refunds.create({
+  payment_intent: payment.stripe_payment_id,
+  amount: Math.round(refundAmount * 100),
+});
+
 
     // Insert a refund record (positive amount)
     await pool.query(
