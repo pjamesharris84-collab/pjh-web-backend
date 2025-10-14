@@ -226,24 +226,25 @@ res.json({
 /* ============================================================
    💰 GET /api/orders/:id/payments — Includes refunds
 ============================================================ */
-router.get("/:id/payments", async (req, res) => {
-  const { id } = req.params;
+router.get("/:orderId/payments", async (req, res) => {
+  const { orderId } = req.params;
   try {
     const { rows } = await pool.query(
       `
-      SELECT id, order_id, customer_id, amount, type, method, status, reference, created_at
+      SELECT id, order_id, amount, type, method, status, reference, created_at
       FROM payments
-      WHERE order_id=$1
-      ORDER BY created_at DESC;
+      WHERE order_id = $1
+      ORDER BY created_at DESC
       `,
-      [id]
+      [orderId]
     );
     res.json({ success: true, payments: rows });
   } catch (err) {
-    console.error("❌ Error fetching payments:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch payments." });
+    console.error("❌ Failed to fetch payments:", err);
+    res.status(500).json({ success: false, error: "Failed to fetch payments" });
   }
 });
+
 
 /* ============================================================
    💸 POST /api/payments/refund — Stripe refund + record

@@ -39,23 +39,23 @@ function toNum(v, f = 0) {
 
 /* ============================================================
    📊 GET /api/payments/summary/:orderId
-   Unified live summary (no refunded_total column required)
+   Returns totals + mandate + monthly amount
 ============================================================ */
 router.get("/summary/:orderId", async (req, res) => {
-  try {
-    const { orderId } = req.params;
+  const { orderId } = req.params;
 
-    // ──────────────────────────────
-    // 1️⃣ Load core order + customer
-    // ──────────────────────────────
+  try {
+    // Get base order + customer + maintenance link
     const { rows } = await pool.query(
-      `SELECT o.id, o.title, o.deposit, o.balance, o.maintenance_id,
-              o.customer_id,
-              c.name AS customer_name, c.email,
-              c.direct_debit_active, c.stripe_mandate_id
-       FROM orders o
-       JOIN customers c ON c.id = o.customer_id
-       WHERE o.id = $1`,
+      `
+      SELECT 
+        o.id, o.title, o.deposit, o.balance, o.maintenance_id,
+        c.id AS customer_id, c.name AS customer_name, c.email,
+        c.direct_debit_active, c.stripe_mandate_id
+      FROM orders o
+      JOIN customers c ON c.id = o.customer_id
+      WHERE o.id = $1
+      `,
       [orderId]
     );
 
@@ -64,44 +64,30 @@ router.get("/summary/:orderId", async (req, res) => {
 
     const order = rows[0];
 
-    // ──────────────────────────────
-    // 2️⃣ Compute maintenance price
-    // ──────────────────────────────
-    const { rows: maintRows } = await pool.query(
-      `SELECT price FROM maintenance_plans WHERE id=$1`,
+    // Monthly maintenance
+    const { rows: maint } = await pool.query(
+      "SELECT price FROM maintenance_plans WHERE id=$1",
       [order.maintenance_id]
     );
-    const maintenanceMonthly = Number(maintRows?.[0]?.price || 0);
+    const maintenanceMonthly = Number(maint?.[0]?.price || 0);
 
-    // ──────────────────────────────
-    // 3️⃣ Calculate total paid + refunded
-    // ──────────────────────────────
-    const { rows: payRows } = await pool.query(
-      `SELECT
-         COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) AS paid_total,
-         COALESCE(SUM(CASE WHEN status='refunded' THEN ABS(amount) ELSE 0 END),0) AS refunded_total
-       FROM payments
-       WHERE order_id=$1`,
+    // Calculate paid + refunded
+    const { rows: payStats } = await pool.query(
+      `
+      SELECT
+        COALESCE(SUM(CASE WHEN status='paid' AND type='deposit' THEN amount END), 0) AS deposit_paid,
+        COALESCE(SUM(CASE WHEN status='paid' AND type='balance' THEN amount END), 0) AS balance_paid,
+        COALESCE(SUM(CASE WHEN status='refunded' THEN amount END), 0) AS refunded_total
+      FROM payments
+      WHERE order_id = $1
+      `,
       [orderId]
     );
-    const paid = Number(payRows[0].paid_total || 0);
-    const refunded = Number(payRows[0].refunded_total || 0);
 
-    // ──────────────────────────────
-    // 4️⃣ Compute outstanding values
-    // ──────────────────────────────
-    const deposit = Number(order.deposit || 0);
-    const balance = Number(order.balance || 0);
-    const total = deposit + balance;
-    const netPaid = Math.max(paid - refunded, 0);
-    const remaining = Math.max(total - netPaid, 0);
+    const stats = payStats[0];
+    const depositOutstanding = Math.max(order.deposit - stats.deposit_paid, 0);
+    const balanceOutstanding = Math.max(order.balance - stats.balance_paid, 0);
 
-    const depositOutstanding = Math.max(deposit - paid, 0);
-    const balanceOutstanding = Math.max(balance - (paid - deposit), 0);
-
-    // ──────────────────────────────
-    // 5️⃣ Response
-    // ──────────────────────────────
     res.json({
       success: true,
       data: {
@@ -111,9 +97,6 @@ router.get("/summary/:orderId", async (req, res) => {
         maintenance_monthly: maintenanceMonthly,
         direct_debit_active: !!order.direct_debit_active,
         mandate_id: order.stripe_mandate_id || null,
-        total_paid: paid,
-        refunded_total: refunded,
-        remaining_balance: remaining,
       },
     });
   } catch (err) {
@@ -121,7 +104,6 @@ router.get("/summary/:orderId", async (req, res) => {
     res.status(500).json({ error: "Failed to build payments summary" });
   }
 });
-
 
 /* ============================================================
    💳 POST /api/payments/create-checkout
@@ -272,34 +254,46 @@ router.post("/webhook", bodyParser.raw({ type: "application/json" }), async (req
 
   try {
     switch (event.type) {
-      case "checkout.session.completed": {
-        const s = event.data.object;
-        const orderId = s.metadata?.order_id;
-        const paymentType = s.metadata?.payment_type || "deposit";
-        const method = s.payment_method_types?.[0] || "card";
-        const amount = (s.amount_total ?? 0) / 100;
-        if (orderId && amount > 0) {
-          await pool.query(
-            `INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-             SELECT id, customer_id, $1, $2, $3, 'paid', $4 FROM orders WHERE id=$5`,
-            [amount, paymentType, method, s.payment_intent, orderId]
-          );
-          console.log(`💰 Payment logged: order #${orderId} £${amount}`);
-        }
-        break;
-      }
+case "checkout.session.completed": {
+  const s = event.data.object;
+  const orderId = s.metadata?.order_id;
+  const paymentType = s.metadata?.payment_type || "deposit";
+  const method = s.payment_method_types?.[0] || "card";
+  const amount = (s.amount_total ?? 0) / 100;
 
-      case "setup_intent.succeeded": {
-        const si = event.data.object;
-        await pool.query(
-          `UPDATE customers 
-           SET stripe_mandate_id=$1, stripe_payment_method_id=$2, direct_debit_active=true 
-           WHERE stripe_customer_id=$3`,
-          [si.mandate, si.payment_method, si.customer]
-        );
-        console.log(`🏦 Direct Debit setup complete for ${si.customer}`);
-        break;
-      }
+  if (orderId && amount > 0) {
+    await pool.query(
+      `
+      INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
+      SELECT id, customer_id, $1, $2, $3, 'paid', $4
+      FROM orders WHERE id=$5
+      `,
+      [amount, paymentType, method, s.payment_intent, orderId]
+    );
+    console.log(`💰 Payment logged: order #${orderId} £${amount}`);
+  }
+  break;
+}
+
+
+case "setup_intent.succeeded": {
+  const si = event.data.object;
+  const paymentMethod = si.payment_method || null;
+  const mandate = si.mandate || null;
+  const customer = si.customer;
+
+  if (customer) {
+    await pool.query(
+      `UPDATE customers 
+       SET stripe_mandate_id=$1, stripe_payment_method_id=$2, direct_debit_active=true 
+       WHERE stripe_customer_id=$3`,
+      [mandate, paymentMethod, customer]
+    );
+    console.log(`🏦 Direct Debit setup complete — mandate ${mandate}`);
+  }
+  break;
+}
+
 
       case "payment_intent.succeeded": {
         const pi = event.data.object;
