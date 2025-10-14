@@ -83,6 +83,14 @@ router.get("/build-run", async (req, res) => {
         stripe_mandate_id,
       } = row;
 
+      // Safely cast monthly_amount to number
+      const monthlyAmount = Number(monthly_amount) || 0;
+      if (isNaN(monthlyAmount) || monthlyAmount <= 0) {
+        console.warn(`⚠️ Skipped ${customer_name}: Invalid monthly amount (${monthly_amount})`);
+        skipped++;
+        continue;
+      }
+
       if (!stripe_customer_id) {
         console.warn(`⚠️ Skipped ${customer_name}: Missing Stripe customer ID.`);
         skipped++;
@@ -133,13 +141,13 @@ router.get("/build-run", async (req, res) => {
       // ------------------------------------------------------------
       try {
         console.log(
-          `💳 Charging ${customer_name} £${monthly_amount.toFixed(
+          `💳 Charging ${customer_name} £${monthlyAmount.toFixed(
             2
           )} for Monthly Build (Order #${order_id})...`
         );
 
         const intent = await stripe.paymentIntents.create({
-          amount: Math.round(monthly_amount * 100),
+          amount: Math.round(monthlyAmount * 100),
           currency: "gbp",
           customer: stripe_customer_id,
           payment_method: paymentMethodId,
@@ -156,7 +164,7 @@ router.get("/build-run", async (req, res) => {
         });
 
         // ------------------------------------------------------------
-        // Log payment in database (corrected version)
+        // Log payment in database
         // ------------------------------------------------------------
         const status =
           intent.status === "succeeded"
@@ -172,11 +180,15 @@ router.get("/build-run", async (req, res) => {
           VALUES ($1,$2,$3,'build','bacs_debit',$4,$5,NOW())
           ON CONFLICT (reference) DO UPDATE SET status=$4;
           `,
-          [order_id, customer_id, monthly_amount, status, intent.id]
+          [order_id, customer_id, monthlyAmount, status, intent.id]
         );
 
         charged++;
-        console.log(`✅ Direct Debit (Build) logged: ${customer_name} — £${monthly_amount} (${status})`);
+        console.log(
+          `✅ Direct Debit (Build) logged: ${customer_name} — £${monthlyAmount.toFixed(
+            2
+          )} (${status})`
+        );
       } catch (err) {
         failed++;
         console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
