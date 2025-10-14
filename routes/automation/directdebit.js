@@ -145,21 +145,17 @@ router.get("/run", async (req, res) => {
         continue;
       }
 
- console.log(`💳 Charging ${customer_name} £${monthlyAmount.toFixed(2)} via Direct Debit...`);
+console.log(`💳 Charging ${customer_name} £${monthlyAmount.toFixed(2)} via Direct Debit...`);
 try {
   const intent = await stripe.paymentIntents.create({
     amount: Math.round(monthlyAmount * 100),
     currency: "gbp",
     customer: stripe_customer_id,
     payment_method: paymentMethodId,
-    payment_method_types: ["bacs_debit"],  // ✅ Force Bacs Debit acceptance
+    payment_method_types: ["bacs_debit"],  // ✅ Explicit Bacs only
     confirm: true,
     mandate: mandateId,
     description: `Monthly Maintenance — ${title}`,
-    automatic_payment_methods: {
-      enabled: true,
-      allow_redirects: "never",
-    },
     metadata: {
       order_id,
       customer_id,
@@ -186,6 +182,7 @@ try {
   console.error(`❌ Failed to charge ${customer_name}: ${err.message}`);
   summary.failed++;
 }
+
 
     }
 
