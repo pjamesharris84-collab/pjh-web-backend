@@ -248,50 +248,110 @@ router.get("/:orderId/payments", async (req, res) => {
 
 /* ============================================================
    💸 POST /api/payments/refund — Stripe refund + record
+   ------------------------------------------------------------
+   • Validates payment_id and amount
+   • Creates refund via Stripe API
+   • Inserts negative "refund" payment entry
+   • Protects against duplicates
 ============================================================ */
 router.post("/refund", async (req, res) => {
   const { payment_id, amount } = req.body;
-  if (!payment_id || !amount)
-    return res
-      .status(400)
-      .json({ success: false, error: "Missing payment_id or amount." });
+
+  if (!payment_id || !amount || isNaN(amount)) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing or invalid payment_id / amount.",
+    });
+  }
 
   try {
-    const { rows } = await pool.query("SELECT * FROM payments WHERE id=$1 LIMIT 1", [
-      payment_id,
-    ]);
-    if (!rows.length)
-      return res.status(404).json({ success: false, error: "Payment not found." });
+    // 🔍 Fetch payment
+    const { rows } = await pool.query(
+      "SELECT * FROM payments WHERE id=$1 LIMIT 1",
+      [payment_id]
+    );
+    if (!rows.length) {
+      return res.status(404).json({
+        success: false,
+        error: "Payment not found.",
+      });
+    }
 
     const payment = rows[0];
     const orderId = payment.order_id;
+    const customerId = payment.customer_id;
+    const stripeRef = payment.reference;
 
-    if (!payment.reference)
-      return res
-        .status(400)
-        .json({ success: false, error: "Payment has no Stripe reference." });
+    if (!stripeRef) {
+      return res.status(400).json({
+        success: false,
+        error: "This payment has no Stripe reference.",
+      });
+    }
 
+    // 🧾 Prevent duplicate refund records
+    const existingRefund = await pool.query(
+      "SELECT 1 FROM payments WHERE reference=$1 AND type='refund' LIMIT 1",
+      [stripeRef]
+    );
+    if (existingRefund.rowCount) {
+      return res.status(400).json({
+        success: false,
+        error: "Refund already processed for this payment.",
+      });
+    }
+
+    // 💸 Create refund in Stripe
     const refund = await stripe.refunds.create({
-      payment_intent: payment.reference,
-      amount: Math.round(amount * 100),
+      payment_intent: stripeRef,
+      amount: Math.round(Number(amount) * 100),
       reason: "requested_by_customer",
+      metadata: {
+        pjh_order_id: String(orderId),
+        pjh_payment_id: String(payment_id),
+      },
     });
 
+    // 🧾 Record refund in DB (negative value, type='refund')
     await pool.query(
       `
-      INSERT INTO payments (order_id, customer_id, amount, type, method, status, reference)
-      VALUES ($1,$2,$3,'refund',$4,'refunded',$5);
+      INSERT INTO payments 
+        (order_id, customer_id, amount, type, method, status, reference, stripe_refund_id, refunded, refund_reason, created_at)
+      VALUES ($1, $2, $3, 'refund', $4, 'refunded', $5, $6, TRUE, 'requested_by_customer', NOW());
       `,
-      [orderId, payment.customer_id, -Math.abs(amount), payment.method, refund.id]
+      [
+        orderId,
+        customerId,
+        -Math.abs(Number(amount)),
+        payment.method || "card",
+        refund.id,
+        refund.id,
+      ]
     );
 
-    console.log(`💸 Refund processed for order ${orderId}: £${amount.toFixed(2)}`);
-    res.json({ success: true, message: "Refund processed successfully." });
+    console.log(
+      `💸 Refund issued: Order #${orderId} — £${Number(amount).toFixed(
+        2
+      )} (Stripe refund: ${refund.id})`
+    );
+
+    return res.json({
+      success: true,
+      message: `Refund of £${Number(amount).toFixed(
+        2
+      )} processed successfully.`,
+      refund_id: refund.id,
+      order_id: orderId,
+    });
   } catch (err) {
     console.error("❌ Refund error:", err);
-    res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({
+      success: false,
+      error: err.message || "Failed to process refund.",
+    });
   }
 });
+
 
 /* ============================================================
    🔁 GET /api/orders/:id/refresh — Re-sync totals
