@@ -2,88 +2,64 @@
  * ============================================================
  * PJH Web Services — Order Diary Routes
  * ============================================================
- * Handles per-order diary entries (notes, updates, progress logs)
- * Each diary entry links to an order via order_id.
+ * Each order can have multiple diary entries (progress, updates, etc.)
  * ============================================================
  */
 
 import express from "express";
 import pool from "../db.js";
-
 const router = express.Router();
 
-/* -----------------------------
-   GET /api/orders/:id/diary
-   → Fetch all diary entries for an order
--------------------------------- */
-router.get("/:id/diary", async (req, res) => {
-  const { id } = req.params;
-
+/* ============================================================
+   📒 GET /api/diary/:orderId — Get diary entries for order
+============================================================ */
+router.get("/:orderId", async (req, res) => {
+  const { orderId } = req.params;
   try {
     const { rows } = await pool.query(
-      `SELECT * FROM order_diary 
-       WHERE order_id=$1 
-       ORDER BY date DESC`,
-      [id]
+      `SELECT * FROM order_diary WHERE order_id=$1 ORDER BY created_at DESC`,
+      [orderId]
     );
-
-    res.json({ success: true, diary: rows });
+    res.json({ success: true, entries: rows });
   } catch (err) {
-    console.error("❌ Error fetching order diary:", err);
-    res.status(500).json({ success: false, message: "Failed to fetch order diary." });
+    console.error("❌ Failed to load diary:", err);
+    res.status(500).json({ success: false, error: "Failed to load diary entries" });
   }
 });
 
-/* -----------------------------
-   POST /api/orders/:id/diary
-   → Add a new diary entry
--------------------------------- */
-router.post("/:id/diary", async (req, res) => {
-  const { id } = req.params;
-  const { note } = req.body;
-
-  if (!note || note.trim() === "") {
-    return res.status(400).json({ success: false, message: "Diary note cannot be empty." });
-  }
+/* ============================================================
+   ✏️ POST /api/diary/:orderId — Add new diary entry
+============================================================ */
+router.post("/:orderId", async (req, res) => {
+  const { orderId } = req.params;
+  const { note, author = "Admin" } = req.body;
+  if (!note?.trim()) return res.status(400).json({ success: false, error: "Empty note" });
 
   try {
     const { rows } = await pool.query(
-      `INSERT INTO order_diary (order_id, note, date)
-       VALUES ($1, $2, NOW())
+      `INSERT INTO order_diary (order_id, note, author, created_at)
+       VALUES ($1,$2,$3,NOW())
        RETURNING *`,
-      [id, note.trim()]
+      [orderId, note.trim(), author]
     );
-
-    res.status(201).json({ success: true, entry: rows[0] });
+    res.json({ success: true, entry: rows[0] });
   } catch (err) {
-    console.error("❌ Error adding diary entry:", err);
-    res.status(500).json({ success: false, message: "Failed to add diary entry." });
+    console.error("❌ Failed to add diary entry:", err);
+    res.status(500).json({ success: false, error: "Failed to add diary entry" });
   }
 });
 
-/* -----------------------------
-   DELETE /api/orders/:id/diary/:entryId
-   → Delete a diary entry
--------------------------------- */
-router.delete("/:id/diary/:entryId", async (req, res) => {
-  const { id, entryId } = req.params;
-
+/* ============================================================
+   🗑️ DELETE /api/diary/:id — Delete a diary entry
+============================================================ */
+router.delete("/:id", async (req, res) => {
+  const { id } = req.params;
   try {
-    const { rows } = await pool.query(
-      `DELETE FROM order_diary 
-       WHERE id=$1 AND order_id=$2 
-       RETURNING id`,
-      [entryId, id]
-    );
-
-    if (rows.length === 0) {
-      return res.status(404).json({ success: false, message: "Diary entry not found." });
-    }
-
-    res.json({ success: true, message: "Diary entry deleted." });
+    await pool.query(`DELETE FROM order_diary WHERE id=$1`, [id]);
+    res.json({ success: true });
   } catch (err) {
-    console.error("❌ Error deleting diary entry:", err);
-    res.status(500).json({ success: false, message: "Failed to delete diary entry." });
+    console.error("❌ Failed to delete diary entry:", err);
+    res.status(500).json({ success: false, error: "Failed to delete diary entry" });
   }
 });
 
