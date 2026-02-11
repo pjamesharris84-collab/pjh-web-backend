@@ -285,14 +285,18 @@ router.post(
           const reference = pi.id;
 
           if (orderId && reference) {
-            await upsertPaymentByReference({
-              reference,
-              orderId,
-              amount,
-              type,
-              method,
-              status: "paid",
-            });
+await upsertPaymentByReference({
+  order_id,
+  customer_id,
+  amount,
+  type,
+  method,
+  reference: paymentIntent.id,
+  stripe_charge_id: charge?.id || event.data.object.charge || null,
+  status: "paid",
+  source: "stripe",
+});
+
             console.log(`🏁 Payment succeeded: Order #${orderId} — £${amount.toFixed(2)}`);
           }
           break;

@@ -1,14 +1,12 @@
 /**
  * ============================================================
- * PJH Web Services — Database Setup & Migrations (2025-10)
+ * PJH Web Services — Database Setup & Migrations (2025-11)
  * ============================================================
  * Non-destructive, idempotent migrations for PostgreSQL.
  * Ensures:
  *   • All core tables exist (customers, packages, quotes, orders, payments)
- *   • New columns: packages.description, packages.pricing_guardrails
- *   • quotes.maintenance_id, orders.maintenance_name/_monthly
- *   • Timestamp triggers, helpful indexes
- *   • Default seed data (packages, maintenance plans) if empty
+ *   • Packages and maintenance_plans seeded with VAT-aligned 2025 pricing
+ *   • Safe for repeated runs — no data loss
  * ============================================================
  */
 
@@ -20,7 +18,7 @@ dotenv.config();
 const { Pool } = pkg;
 
 /* ------------------------------------------------------------
-   Connection Setup (Hosted or Local)
+   Connection Setup
 ------------------------------------------------------------ */
 let connectionOptions;
 
@@ -48,7 +46,7 @@ pool.on("connect", () => console.log("[DB] Connected to PostgreSQL"));
 pool.on("error", (err) => console.error("[DB] Pool Error:", err.message));
 
 /* ------------------------------------------------------------
-   Main Migration Logic (Idempotent / Non-Destructive)
+   Run Migrations (Non-Destructive)
 ------------------------------------------------------------ */
 export async function runMigrations() {
   console.log("[DB] Running PostgreSQL migrations (non-destructive)…");
@@ -57,7 +55,7 @@ export async function runMigrations() {
     await pool.query("BEGIN");
 
     /* ============================================================
-       1️⃣  Core Tables (Create If Missing)
+       1️⃣ Core Tables (Customers, Packages, Quotes, Orders, Payments)
     ============================================================ */
     await pool.query(`
       CREATE TABLE IF NOT EXISTS customers (
@@ -85,14 +83,14 @@ export async function runMigrations() {
         id SERIAL PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
         tagline VARCHAR(255),
-        description TEXT,                                  -- ✅ new (fixes 500)
+        description TEXT,
         price_oneoff NUMERIC(10,2) NOT NULL,
         price_monthly NUMERIC(10,2),
         term_months INTEGER DEFAULT 24,
         features TEXT[] DEFAULT '{}',
         discount_percent NUMERIC(5,2) DEFAULT 0,
         visible BOOLEAN DEFAULT TRUE,
-        pricing_guardrails JSONB DEFAULT '{}'::jsonb,      -- ✅ guardrails support
+        pricing_guardrails JSONB DEFAULT '{}'::jsonb,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       );
@@ -101,7 +99,7 @@ export async function runMigrations() {
         id SERIAL PRIMARY KEY,
         customer_id INTEGER NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
         package_id INTEGER REFERENCES packages(id) ON DELETE SET NULL,
-        maintenance_id INTEGER,                             -- ✅ link to maintenance_plans
+        maintenance_id INTEGER,
         quote_number VARCHAR(255) UNIQUE,
         title VARCHAR(255) NOT NULL,
         description TEXT,
@@ -132,18 +130,15 @@ export async function runMigrations() {
         deposit NUMERIC(10,2) DEFAULT 0,
         balance NUMERIC(10,2) DEFAULT 0,
         diary JSONB NOT NULL DEFAULT '[]'::jsonb,
-        -- Invoicing / payment flags
         deposit_invoiced BOOLEAN DEFAULT false,
         balance_invoiced BOOLEAN DEFAULT false,
         deposit_paid BOOLEAN DEFAULT false,
         balance_paid BOOLEAN DEFAULT false,
         total_paid NUMERIC(10,2) DEFAULT 0,
-        -- Recurring (legacy support)
         recurring BOOLEAN DEFAULT false,
         recurring_amount NUMERIC(10,2),
         recurring_interval VARCHAR(20) DEFAULT 'monthly',
         recurring_active BOOLEAN DEFAULT false,
-        -- ✅ Maintenance snapshot on order
         maintenance_name VARCHAR(120),
         maintenance_monthly NUMERIC(10,2),
         created_at TIMESTAMP DEFAULT NOW(),
@@ -170,10 +165,12 @@ export async function runMigrations() {
           CHECK (status IN ('pending','paid','failed','cancelled','refunded')),
         created_at TIMESTAMP DEFAULT NOW()
       );
+    `);
 
-      /* =======================================
-         Maintenance Plans & Signups
-         ======================================= */
+    /* ============================================================
+       2️⃣ Maintenance Tables
+    ============================================================ */
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS maintenance_plans (
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL,
@@ -203,76 +200,8 @@ export async function runMigrations() {
       );
     `);
 
-    console.log("[DB] Core tables verified/created.");
-
     /* ============================================================
-       2️⃣  Column Backfills / Patching (Safe IF NOT EXISTS)
-    ============================================================ */
-    await pool.query(`
-      DO $$
-      BEGIN
-        -- packages.description
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='packages' AND column_name='description'
-        ) THEN
-          ALTER TABLE packages ADD COLUMN description TEXT;
-        END IF;
-
-        -- packages.pricing_guardrails
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='packages' AND column_name='pricing_guardrails'
-        ) THEN
-          ALTER TABLE packages ADD COLUMN pricing_guardrails JSONB DEFAULT '{}'::jsonb;
-        END IF;
-
-        -- quotes.maintenance_id
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='quotes' AND column_name='maintenance_id'
-        ) THEN
-          ALTER TABLE quotes ADD COLUMN maintenance_id INTEGER;
-        END IF;
-
-        -- orders.maintenance_name
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='orders' AND column_name='maintenance_name'
-        ) THEN
-          ALTER TABLE orders ADD COLUMN maintenance_name VARCHAR(120);
-        END IF;
-
-        -- orders.maintenance_monthly
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='orders' AND column_name='maintenance_monthly'
-        ) THEN
-          ALTER TABLE orders ADD COLUMN maintenance_monthly NUMERIC(10,2);
-        END IF;
-
-        -- packages.visible (legacy)
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='packages' AND column_name='visible'
-        ) THEN
-          ALTER TABLE packages ADD COLUMN visible BOOLEAN DEFAULT TRUE;
-        END IF;
-
-        -- maintenance_plans.visible (legacy)
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_name='maintenance_plans' AND column_name='visible'
-        ) THEN
-          ALTER TABLE maintenance_plans ADD COLUMN visible BOOLEAN DEFAULT TRUE;
-        END IF;
-      END$$;
-    `);
-
-    console.log("[DB] Legacy/patch columns ensured.");
-
-    /* ============================================================
-       3️⃣  Timestamp Triggers
+       3️⃣ Triggers
     ============================================================ */
     await pool.query(`
       CREATE OR REPLACE FUNCTION update_timestamp()
@@ -291,12 +220,6 @@ export async function runMigrations() {
           FOR EACH ROW EXECUTE FUNCTION update_timestamp();
         END IF;
 
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_update_customers_timestamp') THEN
-          CREATE TRIGGER trg_update_customers_timestamp
-          BEFORE UPDATE ON customers
-          FOR EACH ROW EXECUTE FUNCTION update_timestamp();
-        END IF;
-
         IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_update_packages_timestamp') THEN
           CREATE TRIGGER trg_update_packages_timestamp
           BEFORE UPDATE ON packages
@@ -308,48 +231,29 @@ export async function runMigrations() {
           BEFORE UPDATE ON maintenance_plans
           FOR EACH ROW EXECUTE FUNCTION update_timestamp();
         END IF;
-
-        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='trg_update_quotes_timestamp') THEN
-          CREATE TRIGGER trg_update_quotes_timestamp
-          BEFORE UPDATE ON quotes
-          FOR EACH ROW EXECUTE FUNCTION update_timestamp();
-        END IF;
       END$$;
     `);
 
     /* ============================================================
-       4️⃣  Index Optimisation
+       4️⃣ Indexes
     ============================================================ */
     await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_orders_customer_id ON orders(customer_id);
       CREATE INDEX IF NOT EXISTS idx_quotes_customer_id ON quotes(customer_id);
       CREATE INDEX IF NOT EXISTS idx_packages_visible ON packages(visible);
       CREATE INDEX IF NOT EXISTS idx_maint_plans_visible ON maintenance_plans(visible, sort_order);
-      CREATE INDEX IF NOT EXISTS idx_quotes_status ON quotes(status);
-      CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
     `);
 
-    console.log("[DB] Indexes ensured.");
-
     /* ============================================================
-       5️⃣  Default Data Seeding (Only If Empty)
+       5️⃣ Default Data Seeding (Only If Empty)
     ============================================================ */
 
     // Packages
     const { rows: pkgCountRows } = await pool.query(
       "SELECT COUNT(*)::int AS c FROM packages;"
     );
-    if ((pkgCountRows?.[0]?.c ?? 0) === 0) {
-      const guardrailsDefault = {
-        require_deposit_months: 1,
-        min_term_months: 24,
-        early_exit_fee_pct: 35,
-        ownership_until_paid: true,
-        late_fee_pct: 5,
-        default_payment_method: "direct_debit",
-        tcs_version: "2025-10",
-      };
 
+    if ((pkgCountRows?.[0]?.c ?? 0) === 0) {
       const packagesSeed = [
         {
           name: "Starter",
@@ -387,8 +291,7 @@ export async function runMigrations() {
         },
         {
           name: "Premium",
-          tagline:
-            "Our flagship automation suite — bookings, payments & client portals.",
+          tagline: "Our flagship automation suite — bookings, payments & portals.",
           description:
             "A complete digital platform: bespoke CRM, automation, client portals, billing, and analytics.",
           price_oneoff: 2950,
@@ -409,9 +312,8 @@ export async function runMigrations() {
         await pool.query(
           `
           INSERT INTO packages
-            (name, tagline, description, price_oneoff, price_monthly, term_months,
-             features, discount_percent, visible, pricing_guardrails, created_at, updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,0,TRUE,$8::jsonb,NOW(),NOW());
+            (name, tagline, description, price_oneoff, price_monthly, term_months, features, visible, created_at, updated_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,NOW(),NOW());
           `,
           [
             p.name,
@@ -421,58 +323,58 @@ export async function runMigrations() {
             p.price_monthly,
             p.term_months,
             p.features,
-            JSON.stringify(guardrailsDefault),
           ]
         );
       }
       console.log("[DB] Default packages seeded.");
     }
 
-    // Maintenance plans
+    // Maintenance Plans
     const { rows: mpCountRows } = await pool.query(
       "SELECT COUNT(*)::int AS c FROM maintenance_plans;"
     );
+
     if ((mpCountRows?.[0]?.c ?? 0) === 0) {
       const plans = [
         {
           name: "Essential Care",
           price: 45,
           description:
-            "Basic protection for small business sites — backups, updates, security & uptime checks.",
+            "Perfect for small brochure or Starter websites. Monthly updates, daily backups, and essential uptime monitoring.",
           features: [
-            "Weekly backups & plugin updates",
-            "Security & uptime monitoring",
-            "Malware protection & SSL renewal",
-            "Email support (within 48h)",
+            "Monthly plugin & core updates",
+            "Daily backups (7-day retention)",
+            "Basic uptime & security monitoring",
+            "Email support within 2 business days",
+            "Annual payment option (£420 + VAT / £504 inc.)",
           ],
           sort_order: 10,
         },
         {
-          name: "Performance Care",
-          price: 95,
+          name: "WebCare Plus",
+          price: 85,
           description:
-            "Proactive care with speed monitoring, SEO health checks, and monthly reporting.",
+            "Ideal for growing sites needing regular updates, SEO checks, and faster support turnaround.",
           features: [
-            "All Essential features included",
-            "Monthly SEO & performance audit",
-            "Speed & mobile optimisation checks",
-            "1 hour of content edits per month",
-            "Priority support within 48h",
+            "Bi-weekly updates & security scans",
+            "Daily backups (14-day retention)",
+            "Monthly performance report",
+            "Priority same-day email support",
+            "Annual payment option (£900 + VAT / £1,080 inc.)",
           ],
           sort_order: 20,
         },
         {
-          name: "Total WebCare",
-          price: 195,
+          name: "WebCare Premium",
+          price: 145,
           description:
-            "Complete WebCare — edits, analytics, reports, strategy calls and emergency fixes.",
+            "For ecommerce or CRM-driven sites needing performance tuning, SEO audits, and priority fixes.",
           features: [
-            "All Performance features included",
-            "3 hours of monthly content updates",
-            "Analytics dashboard access",
-            "Quarterly strategy call",
-            "Emergency fixes included",
-            "Priority support within 24h",
+            "Weekly updates & deep security scans",
+            "Real-time uptime monitoring",
+            "Monthly performance & SEO audit",
+            "Priority phone & email support",
+            "Annual payment option (£1,560 + VAT / £1,872 inc.)",
           ],
           sort_order: 30,
         },
@@ -488,11 +390,11 @@ export async function runMigrations() {
           [p.name, p.price, p.description, p.features, p.sort_order]
         );
       }
-      console.log("[DB] Default maintenance plans seeded.");
+      console.log("[DB] Default maintenance plans seeded (VAT 2025 pricing).");
     }
 
     await pool.query("COMMIT");
-    console.log("[DB] ✅ Migrations complete — schema up-to-date, no data lost.");
+    console.log("[DB] ✅ Migrations complete — schema and seed data up-to-date.");
   } catch (err) {
     await pool.query("ROLLBACK").catch(() => {});
     console.error("[DB] Migration error:", err.message);
@@ -500,7 +402,7 @@ export async function runMigrations() {
 }
 
 /* ------------------------------------------------------------
-   Utilities
+   Utility Functions
 ------------------------------------------------------------ */
 export async function generateQuoteNumber(customerId, businessName = "Customer") {
   const safeName = (businessName || "Customer")

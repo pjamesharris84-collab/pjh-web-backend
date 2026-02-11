@@ -1,19 +1,15 @@
 /**
  * ============================================================
- * PJH Web Services — Maintenance Plans API (2025-10 Refined)
+ * PJH Web Services — Maintenance Plans API (2025-11, VAT-Aligned)
  * ============================================================
- * Handles WebCare plan listing, customer signup, and
- * Stripe subscription creation for PJH Web Services clients.
+ * Handles WebCare plan listing, signup, and Stripe subscription creation.
  *
- * Plans:
- *  • Essential Care   — £45/mo · Basic security & updates
- *  • Performance Care — £95/mo · Speed, SEO & monthly health
- *  • Total WebCare    — £195/mo · Full care, edits & reporting
+ * Current Plans (ex-VAT):
+ *  • Essential Care   — £45/mo  · Backups, updates & security
+ *  • WebCare Plus     — £85/mo  · Performance, reports & priority support
+ *  • WebCare Premium  — £145/mo · Full WebCare, SEO, audits & emergency fixes
  *
- * Designed for:
- *  • Transparency (no hidden fees)
- *  • Simplicity (plain-English features)
- *  • Local reliability (Suffolk-based support)
+ * Stripe prices are billed inclusive of VAT (20%) for transparency.
  * ============================================================
  */
 
@@ -28,7 +24,8 @@ dotenv.config();
 
 const router = express.Router();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk";
+const FRONTEND_URL =
+  process.env.FRONTEND_URL || "https://www.pjhwebservices.co.uk";
 
 /* ------------------------------------------------------------
    GET /api/maintenance/plans — Public plan list
@@ -42,46 +39,44 @@ router.get("/plans", async (_req, res) => {
       ORDER BY price ASC;
     `);
 
-    // If table empty, fallback to hardcoded defaults
     if (!rows.length) {
+      // Fallback plans if database table empty
       return res.json([
         {
           name: "Essential Care",
           price: 45,
           description:
-            "Basic protection for small business sites — includes backups, updates, and security checks.",
+            "Perfect for small brochure or Starter sites — monthly updates, daily backups, and basic uptime monitoring.",
           features: [
-            "Weekly backups & plugin updates",
-            "Security & uptime monitoring",
-            "Malware protection & SSL renewal",
-            "Email-based support (48h response)",
+            "Monthly plugin & core updates",
+            "Daily backups (7-day retention)",
+            "Basic uptime monitoring",
+            "Email support within 2 business days",
           ],
         },
         {
-          name: "Performance Care",
-          price: 95,
+          name: "WebCare Plus",
+          price: 85,
           description:
-            "Proactive site care with speed monitoring, SEO checks, and monthly reports.",
+            "Ideal for growing sites that need regular updates, SEO health checks, and faster support turnaround.",
           features: [
-            "All Essential features included",
-            "Monthly SEO & performance audit",
-            "Speed & mobile optimisation checks",
-            "1 hour of content edits per month",
-            "Priority support within 48h",
+            "Bi-weekly updates & security scans",
+            "Daily backups (14-day retention)",
+            "Monthly performance report",
+            "Priority same-day email support",
           ],
         },
         {
-          name: "Total WebCare",
-          price: 195,
+          name: "WebCare Premium",
+          price: 145,
           description:
-            "Complete WebCare — full edits, analytics, reports, and emergency fixes included.",
+            "For e-commerce or CRM-driven sites where uptime, SEO audits, and emergency fixes are essential.",
           features: [
-            "All Performance features included",
-            "3 hours of monthly content updates",
-            "Full analytics dashboard access",
-            "Quarterly strategy call",
-            "Emergency fixes included (no charge)",
-            "Priority support within 24h",
+            "Weekly updates & deep security scans",
+            "Real-time uptime monitoring",
+            "Monthly performance & SEO audit",
+            "Priority phone & email support",
+            "Emergency fixes included",
           ],
         },
       ]);
@@ -95,7 +90,7 @@ router.get("/plans", async (_req, res) => {
 });
 
 /* ------------------------------------------------------------
-   POST /api/maintenance/signup — Create subscription
+   POST /api/maintenance/signup — Create Stripe subscription
 ------------------------------------------------------------ */
 router.post("/signup", async (req, res) => {
   try {
@@ -105,7 +100,7 @@ router.post("/signup", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Fetch plan info
+    // Fetch plan
     const { rows } = await pool.query(
       "SELECT * FROM maintenance_plans WHERE id = $1 AND visible = TRUE",
       [planId]
@@ -113,20 +108,24 @@ router.post("/signup", async (req, res) => {
     const plan = rows[0];
     if (!plan) return res.status(404).json({ error: "Plan not found" });
 
-    // Stripe: create subscription session
+    // Calculate VAT-inclusive amount
+    const grossAmount = Math.round(plan.price * 1.2 * 100); // pence
+
+    // Create Stripe Checkout Session (subscription)
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ["card"],
       mode: "subscription",
+      payment_method_types: ["card"],
       line_items: [
         {
           price_data: {
             currency: "gbp",
+            unit_amount: grossAmount,
+            tax_behavior: "inclusive",
+            recurring: { interval: "month" },
             product_data: {
               name: `${plan.name} — PJH WebCare`,
               description: plan.description,
             },
-            unit_amount: Math.round(plan.price * 100),
-            recurring: { interval: "month" },
           },
           quantity: 1,
         },
@@ -134,20 +133,27 @@ router.post("/signup", async (req, res) => {
       customer_email: email,
       success_url: `${FRONTEND_URL}/maintenance/thank-you`,
       cancel_url: `${FRONTEND_URL}/maintenance`,
-      metadata: { plan: plan.name, customer: name },
+      metadata: {
+        plan_name: plan.name,
+        plan_price_ex_vat: plan.price.toFixed(2),
+        vat_rate: "20%",
+        customer_name: name,
+        customer_email: email,
+      },
+      automatic_tax: { enabled: false },
     });
 
     // Log signup in DB
     await pool.query(
       `
-      INSERT INTO maintenance_signups
-        (customer_name, email, plan_name, plan_price, status, created_at)
-      VALUES ($1, $2, $3, $4, 'pending', NOW());
+        INSERT INTO maintenance_signups
+          (customer_name, email, plan_name, plan_price, status, created_at)
+        VALUES ($1, $2, $3, $4, 'pending', NOW());
       `,
       [name, email, plan.name, plan.price]
     );
 
-    // Optional: Send confirmation email (commented for dev safety)
+    // Optional: send confirmation email (disabled in dev)
     /*
     await sendEmail({
       to: email,
@@ -159,7 +165,7 @@ router.post("/signup", async (req, res) => {
     res.json({ success: true, url: session.url });
   } catch (err) {
     console.error("❌ [API] Error creating maintenance signup:", err.message);
-    res.status(500).json({ error: "Failed to start signup" });
+    res.status(500).json({ error: "Failed to start signup process" });
   }
 });
 
